@@ -5,15 +5,15 @@
   "entries": [
     {
       "path": "thinkroom-install/SKILL.md",
-      "sha256": "1521a75ead356c4191e00606140a95d7f0651fae2792d52f7e06c7e0937a1679"
+      "sha256": "26a43ab2e80d80cfaab3a211864db6a66ceac6b7c69e885975e912fd8a183e9a"
     },
     {
       "path": "thinkroom-operate/SKILL.md",
-      "sha256": "26a923881b2de2a597f6ac8e1cdaaa7b57d9eb2974dc0aa9553360df8aecb960"
+      "sha256": "effe55aa2e4771f8ae170b30eb4071e56c76260276a6df8d96012ebc7a79134a"
     },
     {
       "path": "thinkroom-trigger/SKILL.md",
-      "sha256": "06a4be2ef00a594a21d442350026603655a1fad3d3812e620a79e3f895cf3482"
+      "sha256": "5cd9b55f98c3b48a01a307ab9c821422f8f6b097106b185431b87175bc71872c"
     }
   ]
 }

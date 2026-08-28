@@ -1,7 +1,7 @@
 [project]
 name = "thinkroom"
 version = "0.1.0"
-description = "A think tank for any question"
+description = "Evidence-linked multi-perspective AI research for consequential questions"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [

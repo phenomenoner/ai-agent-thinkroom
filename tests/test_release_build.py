@@ -248,21 +248,26 @@ def test_windows_docker_smoke_has_no_machine_local_context_default():
     assert "D:\\Warehouse" not in script
 
 
-def test_public_package_declares_source_available_license_and_repository():
+def test_public_package_declares_mit_license_repository_and_localization():
     metadata = (ROOT / "pyproject.toml").read_text()
     readme = (ROOT / "README.md").read_text()
+    readme_zh_tw = (ROOT / "README.zh-TW.md").read_text()
     license_text = (ROOT / "LICENSE").read_text()
 
     assert (ROOT / "LICENSE").is_file()
     assert 'license = { file = "LICENSE" }' in metadata
     assert 'Repository = "https://github.com/phenomenoner/ai-agent-thinkroom"' in metadata
-    assert "source-available, not open source" in readme
-    assert "use and run an unmodified copy" in license_text
-    assert "including production use" in license_text
-    assert "requirements-production.txt" in readme
-    assert "--require-hashes" in readme
-    assert "--no-deps" in readme
-    assert "verify_locked_runtime.py" in readme
+    assert "open source under the [MIT License](LICENSE)" in readme
+    assert "採用 [MIT License](LICENSE) 開源" in readme_zh_tw
+    assert "Permission is hereby granted, free of charge" in license_text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in license_text
+    assert "[繁體中文](README.zh-TW.md)" in readme
+    assert "[English](README.md)" in readme_zh_tw
+    for text in (readme, readme_zh_tw):
+        assert "requirements-production.txt" in text
+        assert "--require-hashes" in text
+        assert "--no-deps" in text
+        assert "verify_locked_runtime.py" in text
 
 
 def test_release_docs_execute_the_flat_verifier_asset():

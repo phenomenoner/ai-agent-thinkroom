@@ -2,6 +2,14 @@
 
 All notable changes to Thinkroom are documented here.
 
+## Unreleased
+
+### Changed
+
+- Relicensed Thinkroom and its bundled Agent Skills under the MIT License.
+- Reworked the public README around user value, decision triggers, and Hermes/MCP onboarding.
+- Added a full Traditional Chinese README.
+
 ## 0.1.0 — 2026-08-28
 
 ### Added
@@ -19,6 +27,6 @@ All notable changes to Thinkroom are documented here.
 - Loopback-only defaults; v0.1 has no authentication, RBAC, multi-tenancy, or public-ingress protection.
 - SQLite support is single-instance and requires POSIX ownership and mode semantics.
 
-### License
+### Original license
 
-- Public source-available release under the repository's proprietary `LICENSE`; this is not an open-source license.
+- The initial v0.1.0 release was published under the repository's then-current source-available license and was subsequently relicensed under MIT in `Unreleased`.
