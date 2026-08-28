@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -350,91 +351,232 @@ class PrimeAgentBackend:
             f" Keep the complete JSON under {target_output_bytes} UTF-8 bytes; "
             "be concise, emit no prose, and include only schema fields."
         )
-        prompt = json.dumps(payload, ensure_ascii=False)
+        child_name = f"thinkroom-{request.phase}-worker"
+        provider_request = json.dumps(payload, ensure_ascii=False)
+        prompt = (
+            "Act only as a structured Thinkroom research provider. Do not read or write files, "
+            "run shell commands, or perform external effects. Use the persistent IPython kernel "
+            "and call the preloaded rlm exactly once. Name the child "
+            f"{child_name}. Give that child the complete PROVIDER_REQUEST_JSON below and instruct "
+            "it to solve the requested research phase independently, then send its findings to "
+            "the parent with agent_message.send(receiver_role='parent'). End the first turn after "
+            "showing the admission handle. Do not invent or infer the child response. Only after a "
+            "real child agent_message arrives, synthesize and return exactly one JSON object that "
+            "matches output_json_schema, with no markdown or prose.\n\n"
+            f"PROVIDER_REQUEST_JSON:\n{provider_request}"
+        )
         if len(prompt.encode("utf-8")) > 65536:
             raise BackendError(
                 "CONTEXT_LIMIT_EXCEEDED",
-                "Prime Agent prompt exceeds the safe argv byte limit (65536)",
+                "Prime Agent RPC prompt exceeds the safe byte limit (65536)",
             )
-        argv = [
-            self.executable,
-            "--print",
-            "--mode",
-            "text",
-            "--no-tools",
-            "--no-session",
-            "--no-context-files",
-            "--no-skills",
-            "--no-prompt-templates",
-        ]
-        if self.provider:
-            argv += ["--provider", self.provider]
-        if self.configured_model:
-            argv += ["--model", self.configured_model]
-        if self.thinking:
-            argv += ["--thinking", self.thinking]
-        argv.extend(["--", prompt])
-        encoded_sizes = [len(argument.encode("utf-8")) for argument in argv]
-        if (
-            any(size > 65536 for size in encoded_sizes)
-            or sum(size + 1 for size in encoded_sizes) > 65536
-        ):
-            raise BackendError(
-                "CONTEXT_LIMIT_EXCEEDED",
-                "Prime Agent argv exceeds the safe aggregate byte limit (65536)",
-            )
+
         proc: asyncio.subprocess.Process | None = None
-        reader_tasks: list[asyncio.Task[bytes]] = []
-        stdout_task: asyncio.Task[bytes] | None = None
         stderr_task: asyncio.Task[bytes] | None = None
+        session_dir = tempfile.TemporaryDirectory(prefix="thinkroom-prime-rpc-")
         try:
+            argv = [
+                self.executable,
+                "--mode",
+                "rpc",
+                "--tools",
+                "ipython",
+                "--cwd",
+                session_dir.name,
+                "--no-extensions",
+                "--no-context-files",
+                "--no-prompt-templates",
+                "--session-dir",
+                session_dir.name,
+            ]
+            if self.provider:
+                argv += ["--provider", self.provider]
+            if self.configured_model:
+                argv += ["--model", self.configured_model]
+            if self.thinking:
+                argv += ["--thinking", self.thinking]
+            encoded_sizes = [len(argument.encode("utf-8")) for argument in argv]
+            if (
+                any(size > 65536 for size in encoded_sizes)
+                or sum(size + 1 for size in encoded_sizes) > 65536
+            ):
+                raise BackendError(
+                    "CONTEXT_LIMIT_EXCEEDED",
+                    "Prime Agent argv exceeds the safe aggregate byte limit (65536)",
+                )
             proc = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=max(self.max_response_bytes, 65536),
             )
-            assert proc.stdout is not None and proc.stderr is not None
-            # Prime Agent has no supported max-output-tokens CLI flag. Enforce a
-            # conservative UTF-8 byte ceiling no larger than the configured
-            # token ceiling; this may stop early, but can never exceed policy.
-            stdout_limit = min(self.max_response_bytes, self.max_output_tokens)
-            stdout_task = asyncio.create_task(_read_limited(proc.stdout, stdout_limit))
+            assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+            rpc_proc = proc
+            rpc_stdin = proc.stdin
+            rpc_stdout = proc.stdout
             stderr_task = asyncio.create_task(
                 _read_limited(proc.stderr, min(self.max_response_bytes, 65536))
             )
-            reader_tasks = [stdout_task, stderr_task]
+            command = (
+                json.dumps(
+                    {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            rpc_stdin.write(command)
+            await rpc_stdin.drain()
+
+            async def run_rpc() -> dict[str, Any]:
+                retained_event_bytes = 0
+                event_count = 0
+                prompt_accepted = False
+                child_message_received = False
+
+                def child_message_matches(message: object) -> bool:
+                    if not isinstance(message, dict):
+                        return False
+                    details = message.get("details")
+                    sender = details.get("from") if isinstance(details, dict) else None
+                    return (
+                        message.get("role") == "custom"
+                        and message.get("customType") == "agent_message"
+                        and isinstance(details, dict)
+                        and details.get("fromRelationship") == "child"
+                        and isinstance(sender, dict)
+                        and sender.get("sessionName") == child_name
+                    )
+
+                def assistant_text(message: object) -> str | None:
+                    if not isinstance(message, dict) or message.get("role") != "assistant":
+                        return None
+                    if message.get("stopReason") not in {None, "stop"}:
+                        raise BackendError("PROVIDER_ERROR", "Prime Agent assistant turn failed")
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        return content
+                    if not isinstance(content, list):
+                        return None
+                    blocks = [
+                        item.get("text", "")
+                        for item in content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    ]
+                    return "".join(blocks) if blocks else None
+
+                while True:
+                    try:
+                        line = await rpc_stdout.readline()
+                    except ValueError as exc:
+                        raise BackendError(
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "Prime Agent RPC event exceeded byte limit",
+                        ) from exc
+                    if not line:
+                        returncode = await rpc_proc.wait()
+                        if returncode != 0:
+                            raise BackendError(
+                                "PROVIDER_ERROR", "Prime Agent RPC exited unsuccessfully"
+                            )
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent RPC ended before an RLM-backed result",
+                        )
+                    event_count += 1
+                    if event_count > 100_000:
+                        raise BackendError(
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "Prime Agent RPC exceeded the event-count limit",
+                        )
+                    try:
+                        event = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent RPC emitted invalid JSONL",
+                        ) from exc
+                    if not isinstance(event, dict):
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent RPC event was not an object",
+                        )
+                    if event.get("type") in {"response", "message_end", "agent_end"}:
+                        retained_event_bytes += len(line)
+                        if retained_event_bytes > self.max_response_bytes:
+                            raise BackendError(
+                                "OUTPUT_LIMIT_EXCEEDED",
+                                "Prime Agent RPC retained events exceeded byte limit",
+                            )
+                    if event.get("type") == "response" and event.get("id") == "thinkroom-provider":
+                        if event.get("command") != "prompt" or event.get("success") is not True:
+                            raise BackendError(
+                                "PROVIDER_ERROR", "Prime Agent RPC rejected the provider prompt"
+                            )
+                        prompt_accepted = True
+                        continue
+                    if event.get("type") == "message_end":
+                        child_message_received = child_message_received or child_message_matches(
+                            event.get("message")
+                        )
+                        continue
+                    if event.get("type") != "agent_end":
+                        continue
+                    messages = event.get("messages")
+                    if not isinstance(messages, list):
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent RPC agent_end omitted messages",
+                        )
+                    matching_child_indexes = [
+                        index
+                        for index, message in enumerate(messages)
+                        if child_message_matches(message)
+                    ]
+                    child_message_received = child_message_received or bool(matching_child_indexes)
+                    if (
+                        not prompt_accepted
+                        or not child_message_received
+                        or not matching_child_indexes
+                    ):
+                        continue
+                    final_text = next(
+                        (
+                            text
+                            for message in reversed(messages[matching_child_indexes[-1] + 1 :])
+                            if (text := assistant_text(message)) is not None
+                        ),
+                        None,
+                    )
+                    if final_text is None:
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent RPC omitted the terminal assistant message",
+                        )
+                    if len(final_text.encode("utf-8")) > min(
+                        self.max_response_bytes, self.max_output_tokens
+                    ):
+                        raise BackendError(
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "Prime Agent final message exceeded byte limit",
+                        )
+                    return parse_json_object(final_text)
+
             try:
-                stdout, _ = await asyncio.wait_for(
-                    asyncio.gather(stdout_task, stderr_task), timeout=self.timeout
-                )
-                returncode = await proc.wait()
-            except BaseException as exc:
-                # This covers cancellation, timeout, stream overflow, and reader errors.
-                # Always terminate first; _terminate_process escalates after grace.
-                await _terminate_process(proc)
-                for task in reader_tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*reader_tasks, return_exceptions=True)
-                if isinstance(exc, TimeoutError):
-                    raise BackendError("BACKEND_TIMEOUT", "Prime Agent timed out") from exc
-                raise
-            if returncode != 0:
-                raise BackendError("PROVIDER_ERROR", "Prime Agent exited unsuccessfully")
-            try:
-                decoded = stdout.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise BackendError(
-                    "MALFORMED_PROVIDER_OUTPUT", "Prime Agent output was not valid UTF-8"
-                ) from exc
-            return parse_json_object(decoded)
-        except asyncio.CancelledError:
+                return await asyncio.wait_for(run_rpc(), timeout=self.timeout)
+            except TimeoutError as exc:
+                raise BackendError("BACKEND_TIMEOUT", "Prime Agent RPC timed out") from exc
+        finally:
             if proc is not None:
+                if proc.stdin is not None and not proc.stdin.is_closing():
+                    proc.stdin.close()
                 await _terminate_process(proc)
-            for task in reader_tasks:
-                if not task.done():
-                    task.cancel()
-            if reader_tasks:
-                await asyncio.gather(*reader_tasks, return_exceptions=True)
-            raise
+            if stderr_task is not None:
+                if not stderr_task.done():
+                    stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
+            session_dir.cleanup()
 
 
 def parse_json_object(raw: str) -> dict[str, Any]:

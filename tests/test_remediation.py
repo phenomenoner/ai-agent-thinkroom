@@ -1569,14 +1569,14 @@ async def test_prime_backend_rejects_prompt_above_safe_argv_limit_before_spawn()
 
 
 @pytest.mark.asyncio
-async def test_prime_backend_rejects_aggregate_argv_above_safe_limit(monkeypatch):
+async def test_prime_backend_rejects_rpc_prompt_above_safe_limit(monkeypatch):
     from thinkroom import backends as backend_module
 
     backend = PrimeAgentBackend("x" * 4096, "provider", "model", "off")
     monkeypatch.setattr(
         backend_module,
         "provider_payload",
-        lambda request: {"instruction": "Return JSON.", "context": "界" * 21000},
+        lambda request: {"instruction": "Return JSON.", "context": "界" * 22000},
     )
     request = BackendRequestV1(
         phase="frame",
@@ -1606,9 +1606,21 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     executable.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "open(os.environ['CAPTURE'], 'w').write(json.dumps(sys.argv))\n"
-        "print(json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
-        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']}))\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "open(os.environ['CAPTURE'], 'w').write(json.dumps({'argv': sys.argv, 'command': command}))\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "for _ in range(20):\n"
+        "    print(json.dumps({'type': 'message_update', 'delta': 'x' * 1000}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
     )
     executable.chmod(0o755)
     monkeypatch.setenv("CAPTURE", str(capture))
@@ -1630,13 +1642,24 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     backend = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000)
     result = await backend.invoke(request)
     assert result["decision"] == "d"
-    args = json.loads(capture.read_text())
+    captured = json.loads(capture.read_text())
+    args = captured["argv"]
     assert "--json" not in args and "--max-output-tokens" not in args
+    assert "--print" not in args
+    assert "--no-tools" not in args
+    assert "--no-session" not in args
+    assert "--no-skills" not in args
+    assert args[args.index("--mode") + 1] == "rpc"
+    assert args[args.index("--tools") + 1] == "ipython"
+    assert "--session-dir" in args
+    assert args[args.index("--cwd") + 1] == args[args.index("--session-dir") + 1]
     assert backend.model == "configured-default"
     assert "--model" not in args
-    prompt = json.loads(args[-1])
-    assert prompt["output_json_schema"]["title"] == "FrameOutputV1"
-    assert "7000 UTF-8 bytes" in prompt["instruction"]
+    prompt = captured["command"]["message"]
+    assert '"title": "FrameOutputV1"' in prompt
+    assert "7000 UTF-8 bytes" in prompt
+    assert "thinkroom-frame-worker" in prompt
+    assert "agent_message" in prompt
     limited = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=32)
     with pytest.raises(BackendError) as caught:
         await limited.invoke(request)
@@ -1657,6 +1680,46 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     with pytest.raises(BackendError) as invalid_caught:
         await invalid_backend.invoke(request)
     assert invalid_caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_rejects_json_without_matching_rlm_child_message(tmp_path):
+    executable = tmp_path / "prime-without-child"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'wrong child', "
+        "'details': {'message': 'wrong child', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-other-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+    backend = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000)
+    with pytest.raises(BackendError) as caught:
+        await backend.invoke(request)
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
 
 
 @pytest.mark.asyncio

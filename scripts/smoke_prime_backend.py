@@ -14,7 +14,7 @@ async def main() -> None:
     backend = PrimeAgentBackend.from_env(
         timeout=180,
         max_output_tokens=4096,
-        max_response_bytes=256_000,
+        max_response_bytes=1_000_000,
     )
     request = BackendRequestV1(
         phase="frame",

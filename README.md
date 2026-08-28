@@ -123,8 +123,17 @@ or:
 
 ```bash
 export THINKROOM_BACKEND=prime_agent
-export THINKROOM_PRIME_AGENT_EXECUTABLE=...
+export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
+export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
+export THINKROOM_PRIME_AGENT_MODEL=gpt-5.6-luna
+export THINKROOM_PRIME_AGENT_THINKING=max
 ```
+
+Authenticate that Prime Agent installation first with its interactive `/login` flow. The adapter
+does not copy OAuth credentials into Thinkroom; Prime Agent reads and refreshes its own credential
+store. Each Thinkroom provider invocation opens one bounded RPC session, admits exactly one native
+RLM child, and accepts schema JSON only after a matching child `agent_message` reaches the parent.
+The invocation uses a temporary working/session directory and removes it after process settlement.
 
 See [Operations](docs/OPERATIONS.md) for the exact runtime contract and environment variables.
 
