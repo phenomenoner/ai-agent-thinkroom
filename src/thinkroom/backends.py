@@ -564,7 +564,14 @@ class PrimeAgentBackend:
                     return parse_json_object(final_text)
 
             try:
-                return await asyncio.wait_for(run_rpc(), timeout=self.timeout)
+                result = await asyncio.wait_for(run_rpc(), timeout=self.timeout)
+                if not rpc_stdin.is_closing():
+                    rpc_stdin.close()
+                await _terminate_process(rpc_proc)
+                proc = None
+                await stderr_task
+                stderr_task = None
+                return result
             except TimeoutError as exc:
                 raise BackendError("BACKEND_TIMEOUT", "Prime Agent RPC timed out") from exc
         finally:

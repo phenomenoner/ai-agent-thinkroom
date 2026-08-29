@@ -36,4 +36,4 @@ jobs:
           uv run pytest -q
 
 # Docker is intentionally absent: it is operator-owned reference material,
-# not part of the v0.1 native-process release claim.
+# not part of the native-process release contract.
