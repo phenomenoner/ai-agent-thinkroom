@@ -3282,7 +3282,7 @@ def test_cancelled_attempt_cannot_persist_artifacts_or_succeed(tmp_path):
     repo.close()
 
 
-def test_cancelled_attempt_cannot_finish_provider_call(tmp_path):
+def test_cancelled_attempt_rejects_late_success_but_allows_audit_closure(tmp_path):
     repo = SQLiteRepository(str(tmp_path / "db.sqlite"))
     repo.open()
     request = ResearchRequest(question="Should stale provider provenance be rejected?")
@@ -3322,6 +3322,16 @@ def test_cancelled_attempt_cannot_finish_provider_call(tmp_path):
     assert row is not None
     assert row["ended_at"] is None
     assert row["output_status"] == "started"
+    assert row["output_size"] == 0
+    ended_at = datetime.now(UTC).isoformat()
+    assert repo.settle_cancelled_provider_call(
+        call_id,
+        attempt_id,
+        ended_at=ended_at,
+    )
+    row = repo._db().execute("SELECT * FROM provider_calls WHERE id=?", (call_id,)).fetchone()
+    assert row["ended_at"] == ended_at
+    assert row["output_status"] == "cancelled"
     assert row["output_size"] == 0
     repo.close()
 

@@ -207,6 +207,23 @@ class ProcessIsolatedBackend:
             except asyncio.CancelledError:
                 caller_cancelled = True
 
+    @staticmethod
+    async def _consume_receiver_reliably(receiver: asyncio.Task[bytes]) -> None:
+        """Observe receiver completion even while the caller remains cancelled."""
+        while not receiver.done():
+            try:
+                await asyncio.shield(receiver)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                return
+        if receiver.cancelled():
+            return
+        try:
+            receiver.exception()
+        except BaseException:
+            pass
+
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
         parent, child = self._context.Pipe(duplex=True)
         process = self._context.Process(
@@ -224,11 +241,11 @@ class ProcessIsolatedBackend:
                 name="thinkroom-provider-result",
             )
             try:
-                encoded = await asyncio.shield(receiver)
+                encoded = await receiver
             except asyncio.CancelledError:
                 await self._stop_process_reliably(process, parent)
                 parent.close()
-                await asyncio.gather(receiver, return_exceptions=True)
+                await self._consume_receiver_reliably(receiver)
                 raise
             try:
                 parent.send_bytes(_CLOSE)
@@ -275,6 +292,8 @@ class ProcessIsolatedBackend:
             child.close()
             if receiver is not None and not receiver.done():
                 receiver.cancel()
+            if receiver is not None:
+                await self._consume_receiver_reliably(receiver)
             if process.is_alive():
                 caller_cancelled = await self._stop_process_reliably(process, parent)
                 if caller_cancelled:

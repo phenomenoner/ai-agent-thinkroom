@@ -36,6 +36,20 @@ class RolloutBackend(Protocol):
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]: ...
 
 
+class ProviderInvocationAudit(Protocol):
+    """Application-owned durable audit seam for one physical provider call."""
+
+    def start(self, request: BackendRequestV1, backend: str, model: str) -> int: ...
+
+    def finish(
+        self,
+        call_id: int,
+        request: BackendRequestV1,
+        output_status: str,
+        output_size: int = 0,
+    ) -> bool: ...
+
+
 _OUTPUT_MODELS = {
     model.__name__: model
     for model in (

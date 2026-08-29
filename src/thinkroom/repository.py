@@ -646,6 +646,40 @@ class SQLiteRepository:
                     )
                     db.commit()
                     return None
+                previous_policy = db.execute(
+                    "SELECT backend,model FROM attempts WHERE job_id=? ORDER BY number LIMIT 1",
+                    (row["job_id"],),
+                ).fetchone()
+                if previous_policy is not None:
+                    previous_backend = previous_policy["backend"]
+                    previous_model = previous_policy["model"]
+                    failover_policy = "->" in str(previous_backend or "") or "->" in str(
+                        backend or ""
+                    )
+                    if failover_policy and (previous_backend != backend or previous_model != model):
+                        self._transition_locked(
+                            row["job_id"],
+                            JobState.FAILED,
+                            None,
+                            "provider policy drift before retry",
+                            correlation_id,
+                        )
+                        db.execute(
+                            "UPDATE research_jobs SET terminal_error=?,updated_at=? WHERE job_id=?",
+                            (
+                                json.dumps(
+                                    {
+                                        "code": "PROVIDER_POLICY_DRIFT",
+                                        "message": "provider policy changed before retry",
+                                        "details": {},
+                                    }
+                                ),
+                                now(),
+                                row["job_id"],
+                            ),
+                        )
+                        db.commit()
+                        return None
                 attempt_number = int(
                     db.execute(
                         "SELECT COALESCE(MAX(number),0)+1 n FROM attempts WHERE job_id=?",
@@ -721,6 +755,18 @@ class SQLiteRepository:
                     "WHERE attempt_id=?",
                     (now(), row["state"], "terminal attempt reconciliation", row["attempt_id"]),
                 )
+            open_terminal_calls = db.execute(
+                "SELECT p.id,j.state FROM provider_calls p "
+                "JOIN research_jobs j ON j.job_id=p.job_id "
+                "WHERE p.ended_at IS NULL AND j.state IN ('succeeded','failed','cancelled')"
+            ).fetchall()
+            for row in open_terminal_calls:
+                status = "cancelled" if row["state"] == "cancelled" else "uncertain"
+                db.execute(
+                    "UPDATE provider_calls SET ended_at=?,output_status=? "
+                    "WHERE id=? AND ended_at IS NULL",
+                    (now(), status, row["id"]),
+                )
             cancelled = db.execute(
                 "SELECT j.job_id,j.state,j.attempt_id,a.attempt_id AS active_attempt "
                 "FROM research_jobs j LEFT JOIN attempts a ON a.attempt_id=j.attempt_id "
@@ -755,9 +801,58 @@ class SQLiteRepository:
                     ),
                 )
             rows = db.execute(
-                "SELECT a.attempt_id,a.job_id,j.attempt_number,j.state FROM attempts a JOIN research_jobs j ON j.job_id=a.job_id WHERE a.state='active' AND j.state IN ('framing','rolling_out','critiquing','synthesizing') AND j.cancellation_requested=0"
+                "SELECT a.attempt_id,a.job_id,a.backend,j.attempt_number,j.state "
+                "FROM attempts a JOIN research_jobs j ON j.job_id=a.job_id "
+                "WHERE a.state='active' "
+                "AND j.state IN ('framing','rolling_out','critiquing','synthesizing') "
+                "AND j.cancellation_requested=0"
             ).fetchall()
             for row in rows:
+                physical_calls = int(
+                    db.execute(
+                        "SELECT COUNT(*) n FROM provider_calls WHERE attempt_id=?",
+                        (row["attempt_id"],),
+                    ).fetchone()["n"]
+                )
+                if "->" in str(row["backend"] or "") and physical_calls:
+                    ts = now()
+                    db.execute(
+                        "UPDATE provider_calls SET ended_at=?,output_status='uncertain' "
+                        "WHERE attempt_id=? AND ended_at IS NULL",
+                        (ts, row["attempt_id"]),
+                    )
+                    db.execute(
+                        "UPDATE attempts SET state='abandoned',ended_at=?,outcome=?,recovery_reason=? "
+                        "WHERE attempt_id=?",
+                        (
+                            ts,
+                            "provider_attempt_interrupted",
+                            "failover attempt requires reconciliation",
+                            row["attempt_id"],
+                        ),
+                    )
+                    self._transition_locked(
+                        row["job_id"],
+                        JobState.FAILED,
+                        row["attempt_id"],
+                        "failover attempt interrupted",
+                        "recovery",
+                    )
+                    db.execute(
+                        "UPDATE research_jobs SET terminal_error=?,updated_at=? WHERE job_id=?",
+                        (
+                            json.dumps(
+                                {
+                                    "code": "PROVIDER_ATTEMPT_INTERRUPTED",
+                                    "message": "failover attempt interrupted; automatic replay refused",
+                                    "details": {},
+                                }
+                            ),
+                            ts,
+                            row["job_id"],
+                        ),
+                    )
+                    continue
                 db.execute(
                     "UPDATE attempts SET state='abandoned',ended_at=?,outcome='abandoned' WHERE attempt_id=?",
                     (now(), row["attempt_id"]),
@@ -914,6 +1009,41 @@ class SQLiteRepository:
             if updated.rowcount != 1:
                 return False
             self._assert_persisted_budget_locked(job_id)
+            return True
+
+    def settle_cancelled_provider_call(
+        self,
+        call_id: int,
+        attempt_id: str,
+        *,
+        ended_at: str,
+        output_size: int = 0,
+    ) -> bool:
+        """Close one started audit row without admitting late provider output."""
+        db = self._db()
+        with self.lock, db:
+            row = db.execute(
+                "SELECT p.job_id,p.attempt_id,p.ended_at,j.attempt_id AS current_attempt,"
+                "j.cancellation_requested FROM provider_calls p "
+                "JOIN research_jobs j ON j.job_id=p.job_id WHERE p.id=?",
+                (call_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["attempt_id"] != attempt_id
+                or row["current_attempt"] != attempt_id
+                or row["ended_at"] is not None
+                or int(row["cancellation_requested"] or 0) != 1
+            ):
+                return False
+            updated = db.execute(
+                "UPDATE provider_calls SET ended_at=?,output_status='cancelled',output_size=? "
+                "WHERE id=? AND attempt_id=? AND ended_at IS NULL",
+                (ended_at, output_size, call_id, attempt_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            self._assert_persisted_budget_locked(str(row["job_id"]))
             return True
 
     def end_attempt(self, attempt_id: str, outcome: str) -> None:

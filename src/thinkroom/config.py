@@ -23,6 +23,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8787
     log_level: str = "INFO"
+    failover_primary_timeout_seconds: int = 90
 
     @classmethod
     def from_env(cls, **overrides: object) -> Settings:
@@ -44,6 +45,7 @@ class Settings:
             "max_persisted_bytes_per_job",
             "retention_days",
             "port",
+            "failover_primary_timeout_seconds",
         ):
             vals[n] = int(str(vals[n]))
         s = cls(**vals)  # type: ignore[arg-type]
@@ -58,7 +60,7 @@ class Settings:
         return path or ".data/thinkroom.db"
 
     def validate(self) -> None:
-        if self.backend not in {"scripted", "openai", "prime_agent"}:
+        if self.backend not in {"scripted", "openai", "prime_agent", "prime_agent_failover"}:
             raise ValueError("invalid backend")
         if urlparse(self.database_url).scheme not in {"sqlite", "sqlite+aiosqlite"}:
             raise ValueError("only SQLite database URLs are supported")
@@ -74,6 +76,7 @@ class Settings:
             "max_persisted_bytes_per_job": (1_000_000, 100_000_000),
             "retention_days": (1, 3650),
             "port": (1, 65535),
+            "failover_primary_timeout_seconds": (10, 1799),
         }
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
@@ -81,6 +84,11 @@ class Settings:
                 raise ValueError(f"{name} outside validated range")
         if self.backend_timeout_seconds > self.job_timeout_seconds:
             raise ValueError("backend timeout cannot exceed job timeout")
+        if (
+            self.backend == "prime_agent_failover"
+            and self.failover_primary_timeout_seconds >= self.backend_timeout_seconds
+        ):
+            raise ValueError("failover primary timeout must reserve time for the fallback")
         try:
             bind_address = ip_address(self.host)
         except ValueError as exc:

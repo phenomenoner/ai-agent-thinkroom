@@ -135,7 +135,9 @@ Long-running REST and MCP submission SHALL return a job handle rather than keep 
 
 A backend SHALL expose one operation accepting `BackendRequestV1` and returning one validated phase result. The request contains `schema_version`, `phase`, `job_id`, `attempt_id`, optional `branch_id`, `prompt_version`, `input`, expected output schema name, deadline, and correlation ID. Phases are `frame`, `fork`, `rollout`, `critique`, and `synthesis`. The application engine owns phase order and persistence; a backend owns provider invocation and raw-output parsing only.
 
-Provider output must be exactly one JSON object (an optional single Markdown JSON fence may be removed) and must validate against the phase schema. On malformed or invalid output, the same phase may be retried once with bounded validation feedback; a second failure terminates that phase. Backend-specific parsing, retry details, credentials, and invocation remain outside the research domain. Supported configuration values are `scripted`, `openai`, and `prime_agent`.
+Provider output must be exactly one JSON object (an optional single Markdown JSON fence may be removed) and must validate against the phase schema. On malformed or invalid output, the same phase may be retried once with bounded validation feedback; a second failure terminates that phase. Backend-specific parsing, retry details, credentials, and invocation remain outside the research domain. Supported configuration values are `scripted`, `openai`, `prime_agent`, and `prime_agent_failover`.
+
+`prime_agent_failover` invokes one explicitly configured Prime Agent primary and, only after `PROVIDER_ERROR` or `BACKEND_TIMEOUT`, one explicitly configured Prime Agent fallback. The routes execute sequentially inside the existing logical provider-capacity lease. Cancellation, deadline exhaustion, malformed/schema-invalid output, invalid requests, context/output limits, and unsupported phases never cross providers. Each physical provider invocation has its own ordered `provider_calls` row with the physical backend/model and a safe status; the primary availability failure is durably settled before the fallback row is created. No credential, raw provider error, prompt, or response is persisted. The attempt records the complete `primary->fallback` policy. A recovered retry must match that policy exactly. Startup recovery fails an interrupted failover attempt closed as `PROVIDER_ATTEMPT_INTERRUPTED`, marks an unfinished physical call `uncertain`, and never automatically replays an invocation that may already have been sent.
 
 ### REQ-010 — Safety and operations
 
@@ -263,11 +265,12 @@ Environment variables use prefix `THINKROOM_`. Explicit embedded/CLI configurati
 | Setting | Default | Validated bound |
 |---|---:|---|
 | `DATABASE_URL` | `sqlite+aiosqlite:///.data/thinkroom.db` | SQLite only in v0.2 |
-| `BACKEND` | `scripted` | `scripted`, `openai`, `prime_agent` |
+| `BACKEND` | `scripted` | `scripted`, `openai`, `prime_agent`, `prime_agent_failover` |
 | `MAX_CONCURRENCY` | 3 | 1–12 |
 | `MAX_QUEUED_JOBS` | 100 | 1–10,000 |
 | `JOB_TIMEOUT_SECONDS` | 900 | 30–7,200 |
 | `BACKEND_TIMEOUT_SECONDS` | 180 | 10–1,800 and no greater than job timeout |
+| `FAILOVER_PRIMARY_TIMEOUT_SECONDS` | 90 | 10–1,799 and less than backend timeout in failover mode |
 | `MAX_JOB_ATTEMPTS` | 2 | 1–5 |
 | `MAX_BACKEND_RESPONSE_BYTES` | 1,000,000 | 16,384–10,000,000 |
 | `MAX_CONTEXT_BYTES` | 1,000,000 | 16,384–10,000,000 |
@@ -277,7 +280,7 @@ Environment variables use prefix `THINKROOM_`. Explicit embedded/CLI configurati
 | `HOST` / `PORT` | `127.0.0.1` / `8787` | loopback only / 1–65,535 |
 | `LOG_LEVEL` | `INFO` | standard levels |
 
-Provider settings are `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `PRIME_AGENT_EXECUTABLE`, `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_MODEL`, and `PRIME_AGENT_THINKING`. Required settings for the selected backend are validated at startup. Secret values never appear in validation errors.
+Provider settings are `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `PRIME_AGENT_EXECUTABLE`, `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_MODEL`, `PRIME_AGENT_THINKING`, `PRIME_AGENT_FALLBACK_PROVIDER`, `PRIME_AGENT_FALLBACK_MODEL`, and `PRIME_AGENT_FALLBACK_THINKING`. Required settings for the selected backend are validated at startup. Secret values never appear in validation errors.
 
 ## 8. API surface
 

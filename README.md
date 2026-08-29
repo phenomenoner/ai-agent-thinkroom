@@ -213,6 +213,26 @@ export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
 export THINKROOM_JOB_TIMEOUT_SECONDS=3600
 ```
 
+For one sequential Prime Agent availability fallback, keep the same executable and configure both
+routes explicitly:
+
+```bash
+export THINKROOM_BACKEND=prime_agent_failover
+export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
+export THINKROOM_PRIME_AGENT_PROVIDER=openrouter
+export THINKROOM_PRIME_AGENT_MODEL=z-ai/glm-5.3-flash
+export THINKROOM_PRIME_AGENT_THINKING=high
+export THINKROOM_PRIME_AGENT_FALLBACK_PROVIDER=openai-codex
+export THINKROOM_PRIME_AGENT_FALLBACK_MODEL=gpt-5.6-terra
+export THINKROOM_PRIME_AGENT_FALLBACK_THINKING=high
+export THINKROOM_FAILOVER_PRIMARY_TIMEOUT_SECONDS=300
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
+```
+
+The fallback is attempted only for `PROVIDER_ERROR` or `BACKEND_TIMEOUT`; malformed output,
+validation, limits, cancellation, and deadline exhaustion remain on the original route. Put API
+keys in a mode-0600 service environment file rather than in source, unit text, logs, or the database.
+
 Authenticate that [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) installation first
 with its interactive `/login` flow. The adapter
 does not copy OAuth credentials into Thinkroom; Prime Agent reads and refreshes its own credential

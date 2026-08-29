@@ -48,6 +48,10 @@ def request() -> BackendRequestV1:
 
 @pytest.mark.asyncio
 async def test_cooperative_async_cleanup_finishes_within_process_grace() -> None:
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     context = multiprocessing.get_context("forkserver")
     started = context.Event()
     completed = context.Event()
@@ -55,10 +59,15 @@ async def test_cooperative_async_cleanup_finishes_within_process_grace() -> None
         BoundedAsyncCleanupBackend(started, completed),
         shutdown_grace_seconds=0.5,
     )
-    invocation = asyncio.create_task(backend.invoke(request()))
-    assert await asyncio.to_thread(started.wait, 15)
-    invocation.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(invocation, timeout=3)
-    assert completed.is_set()
-    assert backend.active_process_count == 0
+    try:
+        invocation = asyncio.create_task(backend.invoke(request()))
+        assert await asyncio.to_thread(started.wait, 15)
+        invocation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invocation, timeout=3)
+        await asyncio.sleep(0)
+        assert completed.is_set()
+        assert backend.active_process_count == 0
+        assert unhandled == []
+    finally:
+        loop.set_exception_handler(previous_handler)

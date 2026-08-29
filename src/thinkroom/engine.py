@@ -88,6 +88,51 @@ def safe_exception_details(
     return code, message
 
 
+class _RepositoryProviderInvocationAudit:
+    def __init__(self, repo: Any, retry_index: int) -> None:
+        self.repo = repo
+        self.retry_index = retry_index
+
+    def start(self, request: BackendRequestV1, backend: str, model: str) -> int:
+        return self.repo.add_provider_call(
+            {
+                "job_id": request.job_id,
+                "attempt_id": request.attempt_id,
+                "phase": request.phase,
+                "branch_id": request.branch_id,
+                "prompt_version": request.prompt_version,
+                "backend": backend,
+                "model": model,
+                "started_at": datetime.now(UTC).isoformat(),
+                "retry_index": self.retry_index,
+                "output_status": "started",
+                "output_size": 0,
+            }
+        )
+
+    def finish(
+        self,
+        call_id: int,
+        request: BackendRequestV1,
+        output_status: str,
+        output_size: int = 0,
+    ) -> bool:
+        if output_status == "cancelled":
+            return self.repo.settle_cancelled_provider_call(
+                call_id,
+                request.attempt_id,
+                ended_at=datetime.now(UTC).isoformat(),
+                output_size=output_size,
+            )
+        return self.repo.finish_provider_call(
+            call_id,
+            request.attempt_id,
+            ended_at=datetime.now(UTC).isoformat(),
+            output_status=output_status,
+            output_size=output_size,
+        )
+
+
 class _ProviderBoundaryFailure(RuntimeError):
     pass
 
@@ -129,6 +174,27 @@ class ResearchEngine:
     @property
     def provider_capacity_healthy(self) -> bool:
         return not self._detached_provider_tasks
+
+    def _take_provider_identity(
+        self, request: BackendRequestV1
+    ) -> tuple[str, str, str | None, int | None, bool]:
+        take_identity = getattr(self.backend, "take_invocation_identity", None)
+        if callable(take_identity):
+            identity = take_identity(request)
+            backend = getattr(identity, "backend", None)
+            model = getattr(identity, "model", None)
+            primary_error_code = getattr(identity, "primary_error_code", None)
+            call_id = getattr(identity, "call_id", None)
+            call_settled = getattr(identity, "call_settled", False)
+            if (
+                type(backend) is str
+                and type(model) is str
+                and (primary_error_code is None or type(primary_error_code) is str)
+                and (call_id is None or type(call_id) is int)
+                and type(call_settled) is bool
+            ):
+                return backend, model, primary_error_code, call_id, call_settled
+        return self.backend.name, getattr(self.backend, "model", "unknown"), None, None, False
 
     @staticmethod
     def request_hash(request: ResearchRequest) -> str:
@@ -191,7 +257,7 @@ class ResearchEngine:
         task.add_done_callback(completed)
 
     async def _invoke_provider_bounded(
-        self, request: BackendRequestV1, deadline: datetime
+        self, request: BackendRequestV1, deadline: datetime, retry_index: int
     ) -> dict[str, Any]:
         remaining = (deadline - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
@@ -201,7 +267,13 @@ class ResearchEngine:
         except TimeoutError:
             raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded") from None
 
-        task: asyncio.Task[dict[str, Any]] = asyncio.create_task(self.backend.invoke(request))
+        invoke_with_audit = getattr(self.backend, "invoke_with_audit", None)
+        if callable(invoke_with_audit):
+            audit = _RepositoryProviderInvocationAudit(self.repo, retry_index)
+            invocation = cast(Any, invoke_with_audit)(request, audit)
+        else:
+            invocation = self.backend.invoke(request)
+        task: asyncio.Task[dict[str, Any]] = asyncio.create_task(invocation)
         detached = False
         try:
             remaining_after_acquire = (deadline - datetime.now(UTC)).total_seconds()
@@ -746,21 +818,24 @@ class ResearchEngine:
         for retry in range(2):
             retry_index = retry_offset + retry
             await self._guard(job_id, aid, deadline)
-            call_id = self.repo.add_provider_call(
-                {
-                    "job_id": job_id,
-                    "attempt_id": aid,
-                    "phase": phase,
-                    "branch_id": branch_id,
-                    "prompt_version": prompt_version,
-                    "backend": self.backend.name,
-                    "model": getattr(self.backend, "model", "unknown"),
-                    "started_at": datetime.now(UTC).isoformat(),
-                    "retry_index": retry_index,
-                    "output_status": "started",
-                    "output_size": 0,
-                }
-            )
+            physical_audit = callable(getattr(self.backend, "invoke_with_audit", None))
+            call_id: int | None = None
+            if not physical_audit:
+                call_id = self.repo.add_provider_call(
+                    {
+                        "job_id": job_id,
+                        "attempt_id": aid,
+                        "phase": phase,
+                        "branch_id": branch_id,
+                        "prompt_version": prompt_version,
+                        "backend": self.backend.name,
+                        "model": getattr(self.backend, "model", "unknown"),
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "retry_index": retry_index,
+                        "output_status": "started",
+                        "output_size": 0,
+                    }
+                )
             output_size = 0
             try:
                 serialized_input = json.dumps(
@@ -785,19 +860,31 @@ class ResearchEngine:
                     },
                 )
                 await self._guard(job_id, aid, deadline)
-                raw = await self._invoke_provider_bounded(request, deadline)
+                raw = await self._invoke_provider_bounded(request, deadline, retry_index)
                 await self._guard(job_id, aid, deadline)
                 encoded = json.dumps(raw, ensure_ascii=False).encode()
                 output_size = len(encoded)
                 if output_size > self.settings.max_backend_response_bytes:
                     raise BackendError("OUTPUT_LIMIT_EXCEEDED", "backend response too large")
                 result = PHASE_MODELS[phase].model_validate(raw)
+                (
+                    selected_backend,
+                    selected_model,
+                    _,
+                    route_call_id,
+                    call_settled,
+                ) = self._take_provider_identity(request)
+                final_call_id = route_call_id if route_call_id is not None else call_id
+                if final_call_id is None or call_settled:
+                    raise BackendError("PROVIDER_AUDIT_ERROR", "provider audit row is unavailable")
                 admitted = self.repo.finish_provider_call(
-                    call_id,
+                    final_call_id,
                     aid,
                     ended_at=datetime.now(UTC).isoformat(),
                     output_status="validated",
                     output_size=output_size,
+                    backend=selected_backend,
+                    model=selected_model,
                 )
                 if not admitted:
                     await self._guard(job_id, aid, deadline)
@@ -809,37 +896,56 @@ class ResearchEngine:
                         "attempt_id": aid,
                         "correlation_id": correlation,
                         "phase": phase,
-                        "backend": self.backend.name,
-                        "model": getattr(self.backend, "model", "unknown"),
+                        "backend": selected_backend,
+                        "model": selected_model,
                         "output_bytes": output_size,
                         "retry_index": retry_index,
                     },
                 )
                 return result
             except asyncio.CancelledError:
-                self.repo.finish_provider_call(
-                    call_id,
-                    aid,
-                    ended_at=datetime.now(UTC).isoformat(),
-                    output_status="cancelled",
-                    output_size=output_size,
-                )
+                (
+                    selected_backend,
+                    selected_model,
+                    _,
+                    route_call_id,
+                    call_settled,
+                ) = self._take_provider_identity(request)
+                final_call_id = route_call_id if route_call_id is not None else call_id
+                if final_call_id is not None and not call_settled:
+                    self.repo.settle_cancelled_provider_call(
+                        final_call_id,
+                        aid,
+                        ended_at=datetime.now(UTC).isoformat(),
+                        output_size=output_size,
+                    )
                 raise
             except Exception as exc:
                 last = exc
+                (
+                    selected_backend,
+                    selected_model,
+                    _,
+                    route_call_id,
+                    call_settled,
+                ) = self._take_provider_identity(request)
+                final_call_id = route_call_id if route_call_id is not None else call_id
                 output_status, validation_feedback = safe_exception_details(
                     exc,
                     default_code="invalid",
                     default_message="provider output invalid",
                     include_validation_message=True,
                 )
-                self.repo.finish_provider_call(
-                    call_id,
-                    aid,
-                    ended_at=datetime.now(UTC).isoformat(),
-                    output_status=output_status,
-                    output_size=output_size,
-                )
+                if final_call_id is not None and not call_settled:
+                    self.repo.finish_provider_call(
+                        final_call_id,
+                        aid,
+                        ended_at=datetime.now(UTC).isoformat(),
+                        output_status=output_status,
+                        output_size=output_size,
+                        backend=selected_backend,
+                        model=selected_model,
+                    )
                 retryable = isinstance(exc, ValidationError) or (
                     isinstance(exc, BackendError) and exc.code == "MALFORMED_PROVIDER_OUTPUT"
                 )

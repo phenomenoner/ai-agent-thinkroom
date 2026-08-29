@@ -6,13 +6,20 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
 
-from .ports import BackendError, backend_input, provider_payload
+from .ports import (
+    BackendError,
+    ProviderInvocationAudit,
+    RolloutBackend,
+    backend_input,
+    provider_payload,
+)
 from .schemas import (
     BackendRequestV1,
     BranchOutputV1,
@@ -301,6 +308,7 @@ class PrimeAgentBackend:
         thinking = _validate_prime_argv_setting(
             "thinking", thinking, max_characters=64, max_bytes=256
         )
+        self.name = f"prime_agent:{provider or 'configured-default'}"
         self.configured_model = model
         (
             self.executable,
@@ -338,6 +346,38 @@ class PrimeAgentBackend:
             os.getenv("THINKROOM_PRIME_AGENT_PROVIDER", ""),
             os.getenv("THINKROOM_PRIME_AGENT_MODEL", ""),
             os.getenv("THINKROOM_PRIME_AGENT_THINKING", "off"),
+            timeout,
+            max_output_tokens,
+            max_response_bytes,
+        )
+
+    @classmethod
+    def fallback_from_env(
+        cls, timeout: float, max_output_tokens: int = 8192, max_response_bytes: int = 1_000_000
+    ) -> PrimeAgentBackend:
+        executable = os.getenv("THINKROOM_PRIME_AGENT_EXECUTABLE")
+        if not executable:
+            raise ValueError("THINKROOM_PRIME_AGENT_EXECUTABLE is required for prime_agent backend")
+        resolved = shutil.which(executable)
+        if resolved is None:
+            raise ValueError("prime_agent executable does not exist or is not executable")
+        executable_path = Path(resolved)
+        if not executable_path.is_file() or not os.access(executable_path, os.X_OK):
+            raise ValueError("prime_agent executable does not exist or is not executable")
+        provider = os.getenv("THINKROOM_PRIME_AGENT_FALLBACK_PROVIDER")
+        model = os.getenv("THINKROOM_PRIME_AGENT_FALLBACK_MODEL")
+        thinking = os.getenv("THINKROOM_PRIME_AGENT_FALLBACK_THINKING")
+        if not provider:
+            raise ValueError("THINKROOM_PRIME_AGENT_FALLBACK_PROVIDER is required for failover")
+        if not model:
+            raise ValueError("THINKROOM_PRIME_AGENT_FALLBACK_MODEL is required for failover")
+        if not thinking:
+            raise ValueError("THINKROOM_PRIME_AGENT_FALLBACK_THINKING is required for failover")
+        return cls(
+            str(executable_path.resolve()),
+            provider,
+            model,
+            thinking,
             timeout,
             max_output_tokens,
             max_response_bytes,
@@ -591,6 +631,139 @@ class PrimeAgentBackend:
                     stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
             session_dir.cleanup()
+
+
+@dataclass(frozen=True)
+class BackendInvocationIdentity:
+    backend: str
+    model: str
+    used_fallback: bool
+    primary_error_code: str | None = None
+    call_id: int | None = None
+    call_settled: bool = False
+
+
+class FailoverBackend:
+    """Try one physical backend, then one bounded availability fallback."""
+
+    _FALLBACK_CODES = frozenset({"PROVIDER_ERROR", "BACKEND_TIMEOUT"})
+
+    def __init__(self, primary: RolloutBackend, fallback: RolloutBackend) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.name = self._join_identity(primary.name, fallback.name, "backend")
+        self.model = self._join_identity(primary.model, fallback.model, "model")
+        self._identities: dict[tuple[str, str, str | None, str], BackendInvocationIdentity] = {}
+
+    @staticmethod
+    def _join_identity(primary: str, fallback: str, label: str) -> str:
+        if type(primary) is not str or type(fallback) is not str or not primary or not fallback:
+            raise ValueError(f"failover {label} identities must be nonempty strings")
+        value = f"{primary}->{fallback}"
+        if len(value) > 256:
+            raise ValueError(f"failover {label} identity exceeds 256 characters")
+        return value
+
+    @staticmethod
+    def _request_key(request: BackendRequestV1) -> tuple[str, str, str | None, str]:
+        return (request.attempt_id, request.phase, request.branch_id, request.correlation_id)
+
+    def _record(
+        self,
+        request: BackendRequestV1,
+        route: RolloutBackend,
+        *,
+        used_fallback: bool,
+        primary_error_code: str | None = None,
+        call_id: int | None = None,
+        call_settled: bool = False,
+    ) -> None:
+        self._identities[self._request_key(request)] = BackendInvocationIdentity(
+            route.name,
+            route.model,
+            used_fallback,
+            primary_error_code,
+            call_id,
+            call_settled,
+        )
+
+    def take_invocation_identity(self, request: BackendRequestV1) -> BackendInvocationIdentity:
+        return self._identities.pop(
+            self._request_key(request),
+            BackendInvocationIdentity(self.primary.name, self.primary.model, False),
+        )
+
+    async def _invoke_route(
+        self,
+        route: RolloutBackend,
+        request: BackendRequestV1,
+        audit: ProviderInvocationAudit | None,
+        *,
+        used_fallback: bool,
+        primary_error_code: str | None = None,
+    ) -> dict[str, Any]:
+        call_id = audit.start(request, route.name, route.model) if audit is not None else None
+        self._record(
+            request,
+            route,
+            used_fallback=used_fallback,
+            primary_error_code=primary_error_code,
+            call_id=call_id,
+        )
+        try:
+            return await route.invoke(request)
+        except asyncio.CancelledError:
+            if audit is not None and call_id is not None:
+                admitted = audit.finish(call_id, request, "cancelled")
+                self._record(
+                    request,
+                    route,
+                    used_fallback=used_fallback,
+                    primary_error_code=primary_error_code,
+                    call_id=call_id,
+                    call_settled=admitted,
+                )
+            raise
+        except BackendError as exc:
+            if audit is not None and call_id is not None:
+                admitted = audit.finish(call_id, request, exc.code)
+                self._record(
+                    request,
+                    route,
+                    used_fallback=used_fallback,
+                    primary_error_code=primary_error_code,
+                    call_id=call_id,
+                    call_settled=admitted,
+                )
+                if not admitted:
+                    raise BackendError("STALE_ATTEMPT", "attempt is no longer current") from None
+            raise
+
+    async def _invoke(
+        self, request: BackendRequestV1, audit: ProviderInvocationAudit | None
+    ) -> dict[str, Any]:
+        try:
+            return await self._invoke_route(self.primary, request, audit, used_fallback=False)
+        except BackendError as exc:
+            if exc.code not in self._FALLBACK_CODES:
+                raise
+            if request.deadline <= datetime.now(UTC):
+                raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded") from None
+            return await self._invoke_route(
+                self.fallback,
+                request,
+                audit,
+                used_fallback=True,
+                primary_error_code=exc.code,
+            )
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        return await self._invoke(request, None)
+
+    async def invoke_with_audit(
+        self, request: BackendRequestV1, audit: ProviderInvocationAudit
+    ) -> dict[str, Any]:
+        return await self._invoke(request, audit)
 
 
 def parse_json_object(raw: str) -> dict[str, Any]:

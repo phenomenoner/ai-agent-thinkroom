@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
-from .backends import OpenAIBackend, PrimeAgentBackend, ScriptedBackend
+from .backends import FailoverBackend, OpenAIBackend, PrimeAgentBackend, ScriptedBackend
 from .config import Settings
 from .engine import ResearchEngine
 from .ports import RolloutBackend
@@ -377,10 +377,27 @@ class ThinkroomService:
                 self.settings.max_backend_output_tokens,
                 self.settings.max_backend_response_bytes,
             )
-        return PrimeAgentBackend.from_env(
+        if self.settings.backend == "prime_agent":
+            return PrimeAgentBackend.from_env(
+                self.settings.backend_timeout_seconds,
+                self.settings.max_backend_output_tokens,
+                self.settings.max_backend_response_bytes,
+            )
+        primary = PrimeAgentBackend.from_env(
+            self.settings.failover_primary_timeout_seconds,
+            self.settings.max_backend_output_tokens,
+            self.settings.max_backend_response_bytes,
+        )
+        if not primary.provider or not primary.configured_model:
+            raise ValueError("prime_agent failover primary provider and model must be explicit")
+        fallback = PrimeAgentBackend.fallback_from_env(
             self.settings.backend_timeout_seconds,
             self.settings.max_backend_output_tokens,
             self.settings.max_backend_response_bytes,
+        )
+        return FailoverBackend(
+            ProcessIsolatedBackend(primary),
+            ProcessIsolatedBackend(fallback),
         )
 
     async def start(self) -> None:
@@ -397,7 +414,7 @@ class ThinkroomService:
             self._assert_startup_custody()
             self.repo.migrate()
             self._assert_startup_custody()
-            if type(backend) is not ScriptedBackend:
+            if type(backend) not in {ScriptedBackend, FailoverBackend}:
                 backend = ProcessIsolatedBackend(backend)
             self.engine = ResearchEngine(self.repo, backend, self.settings)
             await self.engine.recover()
