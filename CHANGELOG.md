@@ -21,6 +21,8 @@ All notable changes to Thinkroom are documented here.
 - Reworked the public README around user value, decision triggers, and Hermes/MCP onboarding.
 - Prime Agent authentication remains in Prime Agent's credential store; Thinkroom accepts only an
   executable and optional provider/model/thinking routing settings.
+- The bundled operation skill now documents strict MCP request values, one corrected retry after
+  `INVALID_ARGUMENT`, and supervisor-owned blocking waits for asynchronous jobs.
 
 ### Security boundary
 

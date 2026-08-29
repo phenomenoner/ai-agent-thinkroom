@@ -16,8 +16,12 @@ Use this skill after `thinkroom-trigger` passes, or whenever a user asks to subm
 
 1. Verify the service is ready on its configured loopback endpoint.
 2. Frame one explicit question and bounded shared context.
-3. Select a domain and the smallest branch count that covers distinct perspectives.
-4. Use an idempotency key whenever a transport retry or duplicate submission is possible.
+3. Select one supported domain: `generic`, `coding`, or `trading`. Omit the field for
+   the `generic` default; do not send a descriptive natural-language domain label.
+4. Use a branch count from 2 through 6, choosing the smallest count that covers
+   distinct perspectives.
+5. Keep `deadline_seconds`, when provided, between 30 and 7200.
+6. Use an idempotency key whenever a transport retry or duplicate submission is possible.
 
 ## Submit
 
@@ -33,6 +37,12 @@ MCP: call `thinkroom_research` with `question`, optional `context`, `domain`, `b
 
 Submission returns a job handle. It does not imply the research succeeded.
 
+If MCP returns `INVALID_ARGUMENT` without field-level details, treat it as a
+request-schema rejection. Recheck the strict fields above and the callable tool schema,
+then make at most one schema-corrected retry. Preserve the same question, context,
+branch count, and idempotency intent so correction does not silently become a different
+research request. Do not poll or cancel until a submission returns a job handle.
+
 ## Poll and inspect
 
 CLI:
@@ -44,7 +54,11 @@ thinkroom list
 
 MCP: use `thinkroom_get_research` or `thinkroom_list_research`.
 
-Poll until the job reaches `succeeded`, `failed`, or `cancelled`. Interpret only a terminal result.
+Prefer one deadline-bound blocking wait or supervisor task instead of repeated
+main-agent polling. If the available API has no blocking wait, place a finite
+terminal-state observation loop inside that one supervised process; do not turn each
+observation into a new agent turn. Interpret only `succeeded`, `failed`, or `cancelled`
+as terminal, and stop when the declared wait budget is exhausted.
 
 ## Cancel
 
