@@ -12,7 +12,7 @@ All notable changes to Thinkroom are documented here.
 - One matching RLM child and child `agent_message` are required before accepting phase JSON.
 - Bounded RPC event parsing, terminal-result limits, timeout/cancellation cleanup, and temporary
   session ownership.
-- Prime RPC stderr overflow fails closed even when stdout contains an otherwise valid result.
+- Prime RPC stderr is drained without retention and cannot race or override validated JSONL results.
 - Full Traditional Chinese README and a public Prime RLM architecture decision.
 
 ### Changed

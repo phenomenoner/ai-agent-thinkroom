@@ -41,21 +41,19 @@ The adapter independently bounds:
 - configuration and aggregate argv bytes;
 - RPC prompt bytes;
 - each LF-delimited JSONL event and total event count;
-- retained control/result-event bytes and stderr;
+- retained control/result-event bytes;
 - terminal assistant bytes;
 - invocation time and process-settlement grace.
 
-High-volume progress/token telemetry is parsed but not retained as result evidence. Prompt rejection,
-invalid JSONL, wrong or missing child proof, failed assistant turns, output overflow, timeout,
-cancellation, or premature process exit becomes a typed backend failure. All paths close stdin,
-terminate the owned process if necessary, drain/cancel stderr handling, and remove the temporary
-directory before returning capacity.
-
-After a valid terminal result, the adapter terminates the Prime RPC parent and observes the bounded
-stderr reader for a short post-result grace within the same invocation timeout. A descendant that
-inherits stderr cannot extend that wait indefinitely. The production `ProcessIsolatedBackend`
-remains the physical process-group owner and reaps the provider process and every same-group
-descendant before releasing capacity.
+High-volume progress/token telemetry is parsed but not retained as result evidence. Stderr is also
+drained without retention so it cannot create backpressure, disclose diagnostics, or race a valid
+JSONL result; it is not provider-result evidence and does not decide success. Prompt rejection,
+invalid JSONL, wrong or missing child proof, failed assistant turns, bounded JSONL/result overflow,
+timeout, cancellation, or premature process exit becomes a typed backend failure. All paths close
+stdin, terminate the owned process if necessary, cancel stderr draining, and remove the temporary
+directory before returning capacity. The production `ProcessIsolatedBackend` remains the physical
+process-group owner and reaps the provider process and every same-group descendant before releasing
+capacity.
 
 ## Authentication and trust
 

@@ -142,20 +142,12 @@ class ScriptedBackend:
         raise BackendError("UNSUPPORTED_PHASE", request.phase)
 
 
-async def _read_limited(stream: asyncio.StreamReader, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
+async def _drain_unretained(stream: asyncio.StreamReader) -> None:
+    """Prevent stderr backpressure without making diagnostics result evidence."""
     while True:
         chunk = await stream.read(65536)
         if not chunk:
-            return b"".join(chunks)
-        total += len(chunk)
-        if total > limit:
-            raise BackendError("OUTPUT_LIMIT_EXCEEDED", "provider output exceeded byte limit")
-        chunks.append(chunk)
-
-
-_STDERR_POST_RESULT_GRACE_SECONDS = 0.25
+            return
 
 
 async def _terminate_process(proc: asyncio.subprocess.Process, grace: float = 1.0) -> None:
@@ -375,7 +367,7 @@ class PrimeAgentBackend:
             )
 
         proc: asyncio.subprocess.Process | None = None
-        stderr_task: asyncio.Task[bytes] | None = None
+        stderr_task: asyncio.Task[None] | None = None
         session_dir = tempfile.TemporaryDirectory(prefix="thinkroom-prime-rpc-")
         try:
             argv = [
@@ -418,9 +410,7 @@ class PrimeAgentBackend:
             rpc_proc = proc
             rpc_stdin = proc.stdin
             rpc_stdout = proc.stdout
-            stderr_task = asyncio.create_task(
-                _read_limited(proc.stderr, min(self.max_response_bytes, 65536))
-            )
+            stderr_task = asyncio.create_task(_drain_unretained(proc.stderr))
             command = (
                 json.dumps(
                     {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
@@ -571,14 +561,9 @@ class PrimeAgentBackend:
                 if not rpc_stdin.is_closing():
                     rpc_stdin.close()
                 await _terminate_process(rpc_proc)
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(stderr_task),
-                        timeout=_STDERR_POST_RESULT_GRACE_SECONDS,
-                    )
-                except TimeoutError:
+                if not stderr_task.done():
                     stderr_task.cancel()
-                    await asyncio.gather(stderr_task, return_exceptions=True)
+                await asyncio.gather(stderr_task, return_exceptions=True)
                 return result
 
             try:

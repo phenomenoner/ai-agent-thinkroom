@@ -1683,7 +1683,7 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_prime_backend_rejects_valid_result_when_stderr_exceeds_limit(tmp_path):
+async def test_prime_backend_discards_stderr_without_overriding_valid_result(tmp_path):
     executable = tmp_path / "prime-stderr-overflow"
     executable.write_text(
         "#!/usr/bin/env python3\n"
@@ -1719,9 +1719,8 @@ async def test_prime_backend_rejects_valid_result_when_stderr_exceeds_limit(tmp_
         correlation_id="c",
     )
     backend = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000)
-    with pytest.raises(BackendError) as caught:
-        await backend.invoke(request)
-    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    result = await backend.invoke(request)
+    assert result["decision"] == "d"
 
 
 @pytest.mark.asyncio
