@@ -1723,6 +1723,51 @@ async def test_prime_backend_rejects_json_without_matching_rlm_child_message(tmp
 
 
 @pytest.mark.asyncio
+async def test_prime_backend_uses_strict_lf_jsonl_and_only_accepts_answer_after_child(tmp_path):
+    executable = tmp_path / "prime-unicode-jsonl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "early = json.dumps({'schema_version':1,'decision':'early','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']}, ensure_ascii=False)\n"
+        "final = json.dumps({'schema_version':1,'decision':'after\\u2028child','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']}, ensure_ascii=False)\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': early}], "
+        "'stopReason': 'stop'},"
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': final}], "
+        "'stopReason': 'stop'}]}, ensure_ascii=False), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+    backend = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000)
+    result = await backend.invoke(request)
+    assert result["decision"] == "after\u2028child"
+
+
+@pytest.mark.asyncio
 async def test_openai_non_string_content_is_malformed_output():
     class NonStringContentHandler(BaseHTTPRequestHandler):
         def do_POST(self):

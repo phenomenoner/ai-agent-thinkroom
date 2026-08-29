@@ -1,8 +1,8 @@
-# Thinkroom v0.1 — Product and Software Design Specification
+# Thinkroom v0.2 — Product and Software Design Specification
 
 Status: **FROZEN FOR IMPLEMENTATION**
 
-Deployment amendment (2026-08-28, CK approved): the native Python package and POSIX/WSL process are the v0.1 production authority. Docker is retained only as operator-owned reference material and is outside the native release claim.
+Deployment amendment (2026-08-28, CK approved): the native Python package and POSIX/WSL process are the v0.2 production authority. Docker is retained only as operator-owned reference material and is outside the native release claim.
 
 Authority: `thinkroom_ai_think_tank_product_concept.md`
 
@@ -10,7 +10,7 @@ Authority SHA-256: `5fe3d145e5f9cb161f9fb59c0104b83183b376c6f4aab4e643de030da95c
 
 ## 1. Outcome and release claim
 
-Thinkroom v0.1 is a self-hostable AI research service that explores important questions through independent lines of inquiry, preserves evidence and uncertainty, runs cross-critique only after independent rollouts finish, and returns a traceable recommendation.
+Thinkroom v0.2 is a self-hostable AI research service that explores important questions through independent lines of inquiry, preserves evidence and uncertainty, runs cross-critique only after independent rollouts finish, and returns a traceable recommendation.
 
 The target claim for this iteration is **DEPLOYABLE_PRODUCTION_CANDIDATE** for a single-node deployment. The claim requires a built artifact, persistent job recovery, bounded runtime controls, health checks, full automated test evidence, and a real local deployment smoke test. It does not claim public-cloud deployment until a deployment target and credentials are supplied.
 
@@ -38,14 +38,14 @@ Initial domain packs are `generic`, `coding`, and `trading`. Trading is decision
 - Pluggable rollout backend contract.
 - Deterministic scripted backend for tests and offline demonstration.
 - OpenAI-compatible backend for deployable use.
-- Local Prime Agent backend as an opt-in CK workstation integration; tools disabled by default.
+- Local Prime Agent backend with invocation-local RPC and matching native RLM child evidence per phase.
 - Persistent SQLite job store with crash recovery for a single service instance.
 - REST API, minimal Web UI, CLI, Python SDK, and MCP tools.
 - A packaged Agent Skills set for installation, trigger policy, and operations, plus an idempotent fail-closed installer.
 - Cancellation, deadlines, bounded concurrency, input limits, structured logs, liveness/readiness.
 - Local-process deployment path from the built Python distribution.
 
-Local-process deployment is the v0.1 release authority. Docker is an operator-owned reference integration: the repository may provide a Dockerfile, smoke scripts, and hardening guidance, but Thinkroom does not claim, certify, publish, or gate v0.1 on an operator's Docker, Docker Desktop, WSL bridge, container network, or CI environment.
+Local-process deployment is the v0.2 release authority. Docker is an operator-owned reference integration: the repository may provide a Dockerfile, smoke scripts, and hardening guidance, but Thinkroom does not claim, certify, publish, or gate v0.2 on an operator's Docker, Docker Desktop, WSL bridge, container network, or CI environment.
 
 ### P1 — explicitly deferred
 
@@ -91,7 +91,7 @@ Each branch SHALL return:
 
 Model confidence SHALL NOT be represented as evidence. If no verifiable source is available, evidence must remain `unverified`.
 
-In v0.1, `verified` means checked against a trusted local artifact/tool result or supplied authoritative record whose exact reference is persisted. Model-provided text, model-provided URLs, and externally retrieved content remain `unverified` unless such an independent check occurred. Synthesis SHALL NOT upgrade an evidence item's verification status.
+In v0.2, `verified` means checked against a trusted local artifact/tool result or supplied authoritative record whose exact reference is persisted. Model-provided text, model-provided URLs, and externally retrieved content remain `unverified` unless such an independent check occurred. Synthesis SHALL NOT upgrade an evidence item's verification status.
 
 ### REQ-005 — Delayed cross-critique
 
@@ -140,10 +140,24 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
 ### REQ-010 — Safety and operations
 
 - User text SHALL be treated as data, not as executable instructions for the host.
-- Prime Agent execution SHALL use an argument vector, never a shell string, and disable tools in v0.1. Coding context is copied as read-only input data; the adapter SHALL NOT grant write-capable access to a target repository.
+- Prime Agent execution SHALL use an argument vector, never a shell string. Each phase SHALL use an
+  invocation-local JSONL RPC session with only the built-in IPython tool, no context files, no
+  extensions, no prompt templates, and a temporary working/session directory. Thinkroom SHALL
+  instruct the parent to call preloaded `rlm(...)` exactly once with one predictably named child and
+  SHALL return phase JSON only after the same RPC transcript contains a matching child
+  `agent_message` and a later terminal
+  assistant message. Coding context is bounded request data; the adapter SHALL NOT make a target
+  repository the working directory or grant a repository write port.
+- Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,
+  terminal assistant text, stderr, timeout, and cleanup SHALL be bounded. Invalid JSONL, wrong child
+  identity, early parent output, failed turns, prompt rejection, timeout, cancellation, or premature
+  exit SHALL fail as typed backend errors and settle the owned process before capacity is released.
+- Prime Agent owns its provider credentials. Thinkroom SHALL NOT copy OAuth tokens or ambient provider
+  credentials into its configuration or persistence. IPython/RLM is trusted provider execution, not a
+  sandbox; the executable, installed skills, provider account, and host remain operator-owned trust.
 - Secrets SHALL be read from environment variables and never logged or returned.
 - Input sizes, subprocess output, deadlines, retries, and concurrency SHALL be bounded.
-- v0.1 SHALL reject non-loopback bind addresses. Internet-facing access requires a separately tested authenticated reverse-proxy boundary and is not claimed by this release.
+- v0.2 SHALL reject non-loopback bind addresses. Internet-facing access requires a separately tested authenticated reverse-proxy boundary and is not claimed by this release.
 - SQLite production mode SHALL acquire an exclusive inter-process service lock before recovery or worker startup. A second service instance SHALL fail startup and never become ready.
 - Queue depth, backend response bytes/tokens, persisted bytes per job, total context bytes, deadlines, retries, and concurrency SHALL have validated limits. Capacity rejection uses HTTP 429 / MCP `RESOURCE_EXHAUSTED`; oversized input or output uses HTTP 413 / MCP `INVALID_ARGUMENT`; provider-limit failure is durable and auditable.
 
@@ -185,7 +199,7 @@ All schemas forbid unknown fields at provider boundaries and carry `schema_versi
 
 ### 4.2 Initial domain-pack contract
 
-Every pack supplies framing guidance, deterministic fallback perspectives, evaluation criteria, safety language, and prompt version. The minimum v0.1 packs are:
+Every pack supplies framing guidance, deterministic fallback perspectives, evaluation criteria, safety language, and prompt version. The minimum v0.2 packs are:
 
 - `generic`: evidence quality, feasibility, reversibility, consequences, and missing information.
 - `coding`: correctness, simplicity, maintainability, migration/rollback cost, security, operability, and testability; output remains advisory and must identify needed repository evidence.
@@ -215,7 +229,7 @@ This is a modular monolith. Domain models and orchestration do not import FastAP
 
 ### Why not distributed workers now?
 
-Long LLM calls require asynchronous jobs and durable state, but v0.1 is a single-node product. A persisted queue plus one bounded in-process worker survives restart and keeps operational dependencies small. Redis/Celery or cloud queues become justified only when multi-instance scheduling or throughput evidence demands them.
+Long LLM calls require asynchronous jobs and durable state, but v0.2 is a single-node product. A persisted queue plus one bounded in-process worker survives restart and keeps operational dependencies small. Redis/Celery or cloud queues become justified only when multi-instance scheduling or throughput evidence demands them.
 
 ## 6. Data model and provenance
 
@@ -239,7 +253,7 @@ Environment variables use prefix `THINKROOM_`. Explicit embedded/CLI configurati
 
 | Setting | Default | Validated bound |
 |---|---:|---|
-| `DATABASE_URL` | `sqlite+aiosqlite:///.data/thinkroom.db` | SQLite only in v0.1 |
+| `DATABASE_URL` | `sqlite+aiosqlite:///.data/thinkroom.db` | SQLite only in v0.2 |
 | `BACKEND` | `scripted` | `scripted`, `openai`, `prime_agent` |
 | `MAX_CONCURRENCY` | 3 | 1–12 |
 | `MAX_QUEUED_JOBS` | 100 | 1–10,000 |
@@ -333,4 +347,4 @@ Package/local-process smoke is mandatory. Docker availability, execution, or smo
 
 ## 10. Release boundaries
 
-A passing scripted backend proves orchestration and operations, not model quality. A real backend smoke proves integration, not epistemic superiority. The product-value hypothesis—multi-branch evidence synthesis beats a single answer—requires a later evaluation dataset and comparative study; v0.1 preserves the data needed for that study without fabricating the conclusion.
+A passing scripted backend proves orchestration and operations, not model quality. A real backend smoke proves integration, not epistemic superiority. The product-value hypothesis—multi-branch evidence synthesis beats a single answer—requires a later evaluation dataset and comparative study; v0.2 preserves the data needed for that study without fabricating the conclusion.

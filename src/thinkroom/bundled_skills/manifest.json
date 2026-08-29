@@ -1,19 +1,19 @@
 {
   "schema_version": "1",
-  "bundle_version": "0.1.0",
-  "product_version": "0.1.0",
+  "bundle_version": "0.2.0",
+  "product_version": "0.2.0",
   "entries": [
     {
       "path": "thinkroom-install/SKILL.md",
-      "sha256": "26a43ab2e80d80cfaab3a211864db6a66ceac6b7c69e885975e912fd8a183e9a"
+      "sha256": "77cbe74de042bdd473144c0799a8dfa89363b1bc2254703d67bfefc1ec6b52fd"
     },
     {
       "path": "thinkroom-operate/SKILL.md",
-      "sha256": "effe55aa2e4771f8ae170b30eb4071e56c76260276a6df8d96012ebc7a79134a"
+      "sha256": "20600f5674ede573e45c855de793b4a4c33150b66ec6998c155677883395ffce"
     },
     {
       "path": "thinkroom-trigger/SKILL.md",
-      "sha256": "5cd9b55f98c3b48a01a307ab9c821422f8f6b097106b185431b87175bc71872c"
+      "sha256": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
     }
   ]
 }

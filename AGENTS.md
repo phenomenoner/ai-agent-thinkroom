@@ -28,7 +28,7 @@ uv run pytest
 python3 scripts/build_release.py --out-dir /absolute/external/empty/dist
 ```
 
-Add package-install and native production-process smoke tests/scripts. A production wheel release must include `requirements-production.txt`, `uv.lock`, and the flat asset `verify_locked_runtime.py`; install hash-locked dependencies first and the wheel with `--no-deps`. Docker is an operator-owned reference integration, not part of the v0.1 native release claim. Docker availability or smoke status does not gate the native release.
+Add package-install and native production-process smoke tests/scripts. A production wheel release must include `requirements-production.txt`, `uv.lock`, and the flat asset `verify_locked_runtime.py`; install hash-locked dependencies first and the wheel with `--no-deps`. Docker is an operator-owned reference integration, not part of the v0.2 native release claim. Docker availability or smoke status does not gate the native release.
 
 ## Claim discipline
 

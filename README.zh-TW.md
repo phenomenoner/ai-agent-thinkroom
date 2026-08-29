@@ -182,8 +182,23 @@ export THINKROOM_OPENAI_API_KEY=...
 
 ```bash
 export THINKROOM_BACKEND=prime_agent
-export THINKROOM_PRIME_AGENT_EXECUTABLE=...
+export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
+export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
+export THINKROOM_PRIME_AGENT_MODEL=gpt-5.6-luna
+export THINKROOM_PRIME_AGENT_THINKING=max
+export THINKROOM_MAX_CONCURRENCY=1
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
+export THINKROOM_JOB_TIMEOUT_SECONDS=3600
 ```
+
+請先透過 [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) 的互動式 `/login`
+流程完成認證。Thinkroom 不會複製 OAuth 憑證；
+Prime Agent 仍自行讀取與更新它擁有的 credential store。每次 Thinkroom provider invocation
+會建立一個有界的 RPC session，要求一個原生 RLM child，且只有在同一 session 收到名稱
+相符的 child `agent_message` 後，才接受 schema JSON。暫存 working/session directory 會在
+process 完整 settle 後清除。
+上述 concurrency 與 timeout 是 root-plus-child model work 的保守起點，不是通用容量承諾；
+應依實際 provider latency 與 quota 調整。
 
 完整 runtime contract 與環境變數請見 [Operations](docs/OPERATIONS.md)。
 
@@ -200,7 +215,7 @@ export THINKROOM_PRIME_AGENT_EXECUTABLE=...
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.1.0-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.0-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 
@@ -208,15 +223,15 @@ uv pip install --python .venv/bin/python --no-deps thinkroom-0.1.0-py3-none-any.
 
 ## 維運與安全邊界
 
-Thinkroom v0.1 刻意維持單節點架構：
+Thinkroom v0.2 刻意維持單節點架構：
 
 - production 預設只綁定 literal loopback；
 - SQLite 只支援一個 service instance；
 - database parent 必須事先存在於 Linux/POSIX filesystem，擁有者須為有效 service user（或 root），且不可讓 group/world 寫入；
-- v0.1 沒有 authentication、RBAC 或 multi-tenancy；
+- v0.2 沒有 authentication、RBAC 或 multi-tenancy；
 - 若要開放更廣的存取範圍，必須另設安全且經過驗證的 authenticated reverse proxy。
 
-Docker 是由 operator 自行負責的參考資料，不屬於 v0.1 native release claim。若要使用，必須只發布在 host loopback，例如 `-p 127.0.0.1:8787:8787`，並完成 [Operations](docs/OPERATIONS.md) 中的 hardening checklist。
+Docker 是由 operator 自行負責的參考資料，不屬於 v0.2 native release claim。若要使用，必須只發布在 host loopback，例如 `-p 127.0.0.1:8787:8787`，並完成 [Operations](docs/OPERATIONS.md) 中的 hardening checklist。
 
 ## 驗證
 
@@ -234,6 +249,7 @@ Repo contributor 應執行 [AGENTS.md](AGENTS.md) 所列的完整 gates。
 - [產品概念與設計哲學](thinkroom_ai_think_tank_product_concept.md)
 - [產品規格](docs/specification.md)
 - [維運說明](docs/OPERATIONS.md)
+- [架構決策：有界的 Prime Agent RLM RPC](docs/adr/0003-prime-agent-rlm-rpc.md)
 - [安全政策](SECURITY.md)
 - [架構決策：modular monolith](docs/adr/0001-modular-monolith.md)
 - [架構決策：native process release authority](docs/adr/0002-native-process-release-authority.md)

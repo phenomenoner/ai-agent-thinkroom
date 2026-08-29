@@ -6,7 +6,12 @@ Security fixes are considered for the latest tagged release only.
 
 ## Deployment boundary
 
-Thinkroom v0.1 has no authentication, authorization, RBAC, multi-tenancy, or public-ingress protection. After the exact v0.1 tag and release are published, the release-authorized deployment path is the installed Python package running as a native POSIX process on Linux or WSL. Bind only to a literal loopback IP and place any wider access behind a separately secured authenticated reverse proxy.
+Thinkroom v0.2 has no authentication, authorization, RBAC, multi-tenancy, or public-ingress protection. After the exact v0.2 tag and release are published, the release-authorized deployment path is the installed Python package running as a native POSIX process on Linux or WSL. Bind only to a literal loopback IP and place any wider access behind a separately secured authenticated reverse proxy.
+
+The Prime Agent RLM backend enables model-generated Python inside Prime Agent's built-in IPython
+runtime. Invocation-local directories, bounded RPC, disabled context files/extensions/templates, and
+process cleanup limit coupling and lifetime; they do not sandbox the service account. Treat the Prime
+Agent executable, installed skills, OAuth/provider account, and host as trusted infrastructure.
 
 SQLite support is single-instance. Store the database on a POSIX filesystem whose ownership and mode semantics satisfy Thinkroom's fail-closed custody checks.
 

@@ -186,13 +186,19 @@ export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
 export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
 export THINKROOM_PRIME_AGENT_MODEL=gpt-5.6-luna
 export THINKROOM_PRIME_AGENT_THINKING=max
+export THINKROOM_MAX_CONCURRENCY=1
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
+export THINKROOM_JOB_TIMEOUT_SECONDS=3600
 ```
 
-Authenticate that Prime Agent installation first with its interactive `/login` flow. The adapter
+Authenticate that [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) installation first
+with its interactive `/login` flow. The adapter
 does not copy OAuth credentials into Thinkroom; Prime Agent reads and refreshes its own credential
-store. Each Thinkroom provider invocation opens one bounded RPC session, admits exactly one native
-RLM child, and accepts schema JSON only after a matching child `agent_message` reaches the parent.
+store. Each Thinkroom provider invocation opens one bounded RPC session, requests one native RLM
+child, and accepts schema JSON only after a matching child `agent_message` reaches the parent.
 The invocation uses a temporary working/session directory and removes it after process settlement.
+The concurrency and timeout values above are a conservative starting point for root-plus-child model
+work, not a universal capacity claim; tune them from observed provider latency and quotas.
 
 See [Operations](docs/OPERATIONS.md) for the exact runtime contract and environment variables.
 
@@ -209,7 +215,7 @@ For the release-authorized production path, download the wheel, `requirements-pr
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.1.0-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.0-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 
@@ -217,15 +223,15 @@ An ordinary dependency-resolving wheel install is convenient for evaluation, but
 
 ## Operations and security boundary
 
-Thinkroom v0.1 is intentionally a single-node service:
+Thinkroom v0.2 is intentionally a single-node service:
 
 - production defaults bind to literal loopback;
 - SQLite supports one service instance only;
 - the database parent must already exist on a Linux/POSIX filesystem, be owned by the effective service user (or root), and not be group/world-writable;
-- v0.1 has no authentication, RBAC, or multi-tenancy;
+- v0.2 has no authentication, RBAC, or multi-tenancy;
 - wider access requires a separately secured, authenticated reverse proxy.
 
-Docker is optional operator-owned reference material, not part of the v0.1 native release claim. If you use it, publish only on host loopback—for example `-p 127.0.0.1:8787:8787`—and complete the hardening checklist in [Operations](docs/OPERATIONS.md).
+Docker is optional operator-owned reference material, not part of the v0.2 native release claim. If you use it, publish only on host loopback—for example `-p 127.0.0.1:8787:8787`—and complete the hardening checklist in [Operations](docs/OPERATIONS.md).
 
 ## Verification
 
@@ -246,6 +252,7 @@ Repository contributors should run the complete gates documented in [AGENTS.md](
 - [Security policy](SECURITY.md)
 - [Architecture decision: modular monolith](docs/adr/0001-modular-monolith.md)
 - [Architecture decision: native process release authority](docs/adr/0002-native-process-release-authority.md)
+- [Architecture decision: bounded Prime Agent RLM RPC](docs/adr/0003-prime-agent-rlm-rpc.md)
 
 ## License
 

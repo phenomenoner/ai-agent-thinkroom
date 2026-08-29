@@ -1,7 +1,7 @@
 ---
 name: thinkroom-operate
 description: Operate Thinkroom research jobs
-version: 0.1.0
+version: 0.2.0
 author: CK, Martin (Hermes Agent)
 license: MIT
 platforms: [linux]
