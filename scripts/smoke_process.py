@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,17 @@ def wait_ready(port: int, process: subprocess.Popen[bytes]) -> None:
     raise RuntimeError("process did not become ready")
 
 
-port = 18787
+def available_loopback_port(*, exclude: int | None = None) -> int:
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        if port != exclude:
+            return port
+
+
+port = available_loopback_port()
+lock_probe_port = available_loopback_port(exclude=port)
 with tempfile.TemporaryDirectory() as directory:
     env = {
         **os.environ,
@@ -58,14 +69,21 @@ with tempfile.TemporaryDirectory() as directory:
             time.sleep(0.1)
         if detail["state"] != "succeeded":
             raise RuntimeError("process smoke: submitted job did not succeed")
-        second_command = [sys.executable, "-m", "thinkroom", "serve", "--port", str(port + 1)]
+        second_command = [
+            sys.executable,
+            "-m",
+            "thinkroom",
+            "serve",
+            "--port",
+            str(lock_probe_port),
+        ]
         second = subprocess.Popen(
             second_command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         try:
             time.sleep(1)
             try:
-                urlopen(f"http://127.0.0.1:{port + 1}/health/live", timeout=0.5)
+                urlopen(f"http://127.0.0.1:{lock_probe_port}/health/live", timeout=0.5)
             except OSError:
                 pass
             else:
