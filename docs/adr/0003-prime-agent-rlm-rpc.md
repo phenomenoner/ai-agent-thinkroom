@@ -51,6 +51,12 @@ cancellation, or premature process exit becomes a typed backend failure. All pat
 terminate the owned process if necessary, drain/cancel stderr handling, and remove the temporary
 directory before returning capacity.
 
+After a valid terminal result, the adapter terminates the Prime RPC parent and observes the bounded
+stderr reader for a short post-result grace within the same invocation timeout. A descendant that
+inherits stderr cannot extend that wait indefinitely. The production `ProcessIsolatedBackend`
+remains the physical process-group owner and reaps the provider process and every same-group
+descendant before releasing capacity.
+
 ## Authentication and trust
 
 Prime Agent retains custody of provider credentials, including `openai-codex` OAuth. Thinkroom stores

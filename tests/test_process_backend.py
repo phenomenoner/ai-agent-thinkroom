@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from thinkroom.api import create_app
-from thinkroom.backends import ScriptedBackend
+from thinkroom.backends import PrimeAgentBackend, ScriptedBackend
 from thinkroom.config import Settings
 from thinkroom.process_backend import ProcessIsolatedBackend
 from thinkroom.schemas import BackendRequestV1, FrameInputV1, ResearchRequest
@@ -133,6 +133,52 @@ async def test_normal_provider_return_reaps_its_process_group(tmp_path) -> None:
         if grandchild_pid > 0:
             try:
                 os.kill(grandchild_pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_prime_result_settles_when_descendant_keeps_stderr_open(tmp_path) -> None:
+    descendant_pid_path = tmp_path / "prime-descendant.pid"
+    executable = tmp_path / "prime-with-stderr-descendant"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, subprocess, sys\n"
+        f"pid_path = pathlib.Path({str(descendant_pid_path)!r})\n"
+        "descendant = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(3600)'], stdout=subprocess.DEVNULL)\n"
+        "pid_path.write_text(str(descendant.pid))\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    backend = ProcessIsolatedBackend(
+        PrimeAgentBackend(str(executable), "", "", "off", timeout=3),
+        shutdown_grace_seconds=0.2,
+        context_name="forkserver",
+    )
+    descendant_pid = 0
+    try:
+        result = await asyncio.wait_for(backend.invoke(frame_request()), timeout=8)
+        assert result["decision"] == "d"
+        descendant_pid = int(descendant_pid_path.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(descendant_pid, 0)
+        assert backend.active_process_count == 0
+    finally:
+        if descendant_pid > 0:
+            try:
+                os.kill(descendant_pid, 9)
             except ProcessLookupError:
                 pass
 

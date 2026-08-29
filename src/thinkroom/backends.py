@@ -155,6 +155,9 @@ async def _read_limited(stream: asyncio.StreamReader, limit: int) -> bytes:
         chunks.append(chunk)
 
 
+_STDERR_POST_RESULT_GRACE_SECONDS = 0.25
+
+
 async def _terminate_process(proc: asyncio.subprocess.Process, grace: float = 1.0) -> None:
     """Gracefully stop a child, escalating only after the bounded grace period."""
     if proc.returncode is not None:
@@ -563,15 +566,23 @@ class PrimeAgentBackend:
                         )
                     return parse_json_object(final_text)
 
-            try:
-                result = await asyncio.wait_for(run_rpc(), timeout=self.timeout)
+            async def run_rpc_and_settle() -> dict[str, Any]:
+                result = await run_rpc()
                 if not rpc_stdin.is_closing():
                     rpc_stdin.close()
                 await _terminate_process(rpc_proc)
-                proc = None
-                await stderr_task
-                stderr_task = None
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(stderr_task),
+                        timeout=_STDERR_POST_RESULT_GRACE_SECONDS,
+                    )
+                except TimeoutError:
+                    stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
                 return result
+
+            try:
+                return await asyncio.wait_for(run_rpc_and_settle(), timeout=self.timeout)
             except TimeoutError as exc:
                 raise BackendError("BACKEND_TIMEOUT", "Prime Agent RPC timed out") from exc
         finally:

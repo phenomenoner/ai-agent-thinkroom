@@ -7,14 +7,17 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from thinkroom.backends import PrimeAgentBackend
+from thinkroom.process_backend import ProcessIsolatedBackend
 from thinkroom.schemas import BackendRequestV1, FrameInputV1, FrameOutputV1
 
 
 async def main() -> None:
-    backend = PrimeAgentBackend.from_env(
-        timeout=600,
-        max_output_tokens=4096,
-        max_response_bytes=1_000_000,
+    backend = ProcessIsolatedBackend(
+        PrimeAgentBackend.from_env(
+            timeout=600,
+            max_output_tokens=4096,
+            max_response_bytes=1_000_000,
+        )
     )
     request = BackendRequestV1(
         phase="frame",

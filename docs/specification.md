@@ -149,7 +149,9 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   assistant message. Coding context is bounded request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.
 - Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,
-  terminal assistant text, stderr, timeout, and cleanup SHALL be bounded. Invalid JSONL, wrong child
+  terminal assistant text, stderr, timeout, and cleanup SHALL be bounded. Post-result stderr
+  settlement SHALL use finite grace inside the invocation timeout, while the production process
+  wrapper SHALL retain same-group descendant custody until physical exit. Invalid JSONL, wrong child
   identity, early parent output, failed turns, prompt rejection, timeout, cancellation, or premature
   exit SHALL fail as typed backend errors and settle the owned process before capacity is released.
 - Prime Agent owns its provider credentials. Thinkroom SHALL NOT copy OAuth tokens or ambient provider
