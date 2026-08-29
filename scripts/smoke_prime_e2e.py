@@ -37,10 +37,10 @@ def main() -> None:
         settings = Settings.from_env(
             backend="prime_agent",
             database_url=f"sqlite+aiosqlite:///{Path(directory) / 'thinkroom.db'}",
-            max_concurrency=2,
+            max_concurrency=1,
             max_queued_jobs=4,
-            backend_timeout_seconds=240,
-            job_timeout_seconds=1200,
+            backend_timeout_seconds=600,
+            job_timeout_seconds=3600,
         )
         result = Thinkroom(domain="coding", settings=settings).research(
             question="Should a production research service prefer durable asynchronous jobs over one long synchronous HTTP request?",

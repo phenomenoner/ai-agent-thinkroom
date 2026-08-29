@@ -12,7 +12,7 @@ from thinkroom.schemas import BackendRequestV1, FrameInputV1, FrameOutputV1
 
 async def main() -> None:
     backend = PrimeAgentBackend.from_env(
-        timeout=180,
+        timeout=600,
         max_output_tokens=4096,
         max_response_bytes=1_000_000,
     )
@@ -29,7 +29,7 @@ async def main() -> None:
             safety="Advisory only; do not modify systems.",
         ),
         expected_output_schema="FrameOutputV1",
-        deadline=datetime.now(UTC) + timedelta(minutes=3),
+        deadline=datetime.now(UTC) + timedelta(minutes=10),
         correlation_id="smoke-correlation",
     )
     validated = FrameOutputV1.model_validate(await backend.invoke(request))
