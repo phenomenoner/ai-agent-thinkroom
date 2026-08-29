@@ -274,6 +274,10 @@ def _validate_prime_argv_setting(
     return value
 
 
+_PRIME_RPC_RAW_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
+
+
 class PrimeAgentBackend:
     name = "prime_agent"
 
@@ -423,6 +427,7 @@ class PrimeAgentBackend:
             await rpc_stdin.drain()
 
             async def run_rpc() -> dict[str, Any]:
+                raw_transport_bytes = 0
                 retained_event_bytes = 0
                 event_count = 0
                 prompt_accepted = False
@@ -477,8 +482,14 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC ended before an RLM-backed result",
                         )
+                    raw_transport_bytes += len(line)
+                    if raw_transport_bytes > _PRIME_RPC_RAW_BYTE_LIMIT:
+                        raise BackendError(
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "Prime Agent RPC raw transport exceeded byte limit",
+                        )
                     event_count += 1
-                    if event_count > 100_000:
+                    if event_count > _PRIME_RPC_EVENT_COUNT_LIMIT:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent RPC exceeded the event-count limit",

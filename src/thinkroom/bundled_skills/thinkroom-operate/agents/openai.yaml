@@ -1,0 +1,6 @@
+interface:
+  display_name: "Thinkroom Operate"
+  short_description: "Submit and inspect evidence-bound Thinkroom research jobs"
+  default_prompt: "Use $thinkroom-operate to submit or inspect a bounded Thinkroom research job."
+policy:
+  allow_implicit_invocation: true

@@ -1683,6 +1683,119 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection(
+    tmp_path, monkeypatch
+):
+    from thinkroom import backends as backend_module
+
+    executable = tmp_path / "prime-raw-overflow"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "for _ in range(20):\n"
+        "    print(json.dumps({'type': 'message_update', 'delta': 'x' * 256}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1024)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=4096).invoke(
+            request
+        )
+
+    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert "raw transport" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
+    tmp_path, monkeypatch
+):
+    from thinkroom import backends as backend_module
+
+    pid_file = tmp_path / "prime-event-count.pid"
+    executable = tmp_path / "prime-event-count"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "open(os.environ['PID_FILE'], 'w').write(str(os.getpid()))\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "for _ in range(int(os.environ['UPDATES'])):\n"
+        "    print(json.dumps({'type': 'message_update', 'delta': 'x'}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PID_FILE", str(pid_file))
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1_000_000)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 3)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    monkeypatch.setenv("UPDATES", "1")
+    accepted = await PrimeAgentBackend(
+        str(executable), "", "", "off", max_response_bytes=4096
+    ).invoke(request)
+    assert accepted["decision"] == "d"
+
+    monkeypatch.setenv("UPDATES", "2")
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=4096).invoke(
+            request
+        )
+
+    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert "event-count" in str(caught.value)
+    pid = int(pid_file.read_text())
+    for _ in range(100):
+        if not Path(f"/proc/{pid}").exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.asyncio
 async def test_prime_backend_discards_stderr_without_overriding_valid_result(tmp_path):
     executable = tmp_path / "prime-stderr-overflow"
     executable.write_text(
@@ -2219,7 +2332,7 @@ def test_cli_serve_injects_explicit_settings_without_import_time_app(monkeypatch
     assert not hasattr(api_module, "app")
 
 
-def test_skills_cli_uses_documented_target_option():
+def test_skills_cli_exposes_custom_target_and_agent_profiles():
     from typer.main import get_command
 
     from thinkroom.cli import app
@@ -2233,7 +2346,70 @@ def test_skills_cli_uses_documented_target_option():
     for command_name in ("install", "status", "uninstall"):
         command = skill_commands[command_name]
         target = next(parameter for parameter in command.params if parameter.name == "target")
+        profile = next(parameter for parameter in command.params if parameter.name == "profile")
         assert "--target" in target.opts
+        assert "--profile" in profile.opts
+
+
+def test_skills_cli_profiles_use_one_managed_installer(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    import thinkroom.cli as cli_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = CliRunner()
+    codex = runner.invoke(cli_module.app, ["skills", "install", "--profile", "codex"])
+    assert codex.exit_code == 0, codex.output
+    codex_root = tmp_path / ".agents" / "skills"
+    assert (codex_root / "thinkroom-trigger" / "SKILL.md").is_file()
+    assert (codex_root / "thinkroom-trigger" / "agents" / "openai.yaml").is_file()
+
+    hermes_home = tmp_path / "named-hermes-profile"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    hermes = runner.invoke(cli_module.app, ["skills", "install", "--profile", "hermes"])
+    assert hermes.exit_code == 0, hermes.output
+    hermes_root = hermes_home / "skills"
+    assert (hermes_root / "thinkroom-operate" / "SKILL.md").is_file()
+
+    neither = runner.invoke(cli_module.app, ["skills", "status"])
+    assert neither.exit_code != 0
+    both = runner.invoke(
+        cli_module.app,
+        ["skills", "status", "--profile", "codex", "--target", str(tmp_path / "custom")],
+    )
+    assert both.exit_code != 0
+
+
+@pytest.mark.parametrize("value", ["", "relative/profile"])
+def test_skills_cli_rejects_ambiguous_hermes_home(tmp_path, monkeypatch, value):
+    from typer.testing import CliRunner
+
+    import thinkroom.cli as cli_module
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", value)
+    target = tmp_path / "skills"
+    before = _skills_tree_snapshot(tmp_path)
+
+    result = CliRunner().invoke(cli_module.app, ["skills", "install", "--profile", "hermes"])
+
+    assert result.exit_code != 0
+    assert "absolute" in result.output or "empty" in result.output
+    assert not target.exists()
+    assert _skills_tree_snapshot(tmp_path) == before
+
+
+def test_bundled_skills_include_codex_app_metadata():
+    bundle = Path(__file__).parents[1] / "src" / "thinkroom" / "bundled_skills"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    paths = {entry["path"] for entry in manifest["entries"]}
+    for skill in ("thinkroom-install", "thinkroom-operate", "thinkroom-trigger"):
+        metadata_path = f"{skill}/agents/openai.yaml"
+        assert metadata_path in paths
+        metadata = (bundle / metadata_path).read_text()
+        assert "interface:" in metadata
+        assert "display_name:" in metadata
+        assert "short_description:" in metadata
 
 
 @pytest.mark.asyncio
@@ -4134,6 +4310,177 @@ def _skills_tree_snapshot(root: Path) -> list[tuple[str, str, bytes | str | int]
         else:
             snapshot.append((relative, "special", stat.S_IFMT(value.st_mode)))
     return snapshot
+
+
+_PREPROFILE_MANIFEST_SHA256 = "8544d4efad9b1d605b8cd3e9706ba94963286a12d617809f79fdd50ae92cc9a5"
+_PREPROFILE_FILES = {
+    "thinkroom-install/SKILL.md": "77cbe74de042bdd473144c0799a8dfa89363b1bc2254703d67bfefc1ec6b52fd",
+    "thinkroom-operate/SKILL.md": "6d905d1e84bfd0244d5f264d66f3e58ca7b8d0f997bd51676f76b971c08601d8",
+    "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
+}
+
+
+def _seed_preprofile_skills(target: Path) -> None:
+    from thinkroom import skills as skill_module
+
+    fixture = Path(__file__).parent / "fixtures/thinkroom-install-v020-preprofiles.txt"
+    payloads = {
+        "thinkroom-install/SKILL.md": fixture.read_bytes(),
+        "thinkroom-operate/SKILL.md": (
+            skill_module.BUNDLE / "thinkroom-operate/SKILL.md"
+        ).read_bytes(),
+        "thinkroom-trigger/SKILL.md": (
+            Path(__file__).parent / "fixtures/thinkroom-trigger-v020-preprofiles.txt"
+        ).read_bytes(),
+    }
+    assert {
+        relative: hashlib.sha256(data).hexdigest() for relative, data in payloads.items()
+    } == _PREPROFILE_FILES
+    for relative, data in payloads.items():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    receipt = target / ".thinkroom/skills-receipt-v1.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "receipt_version": "1",
+                "bundle_version": "0.2.0",
+                "manifest_sha256": _PREPROFILE_MANIFEST_SHA256,
+                "files": [
+                    {"path": path, "sha256": digest} for path, digest in _PREPROFILE_FILES.items()
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def test_skills_known_preprofile_receipt_migrates_to_six_file_bundle(tmp_path):
+    target = tmp_path / "skills"
+    _seed_preprofile_skills(target)
+
+    planned = plan(target)
+    classifications = {item["path"]: item["classification"] for item in planned}
+    assert classifications["thinkroom-install/SKILL.md"] == "UPDATE"
+    assert classifications["thinkroom-install/agents/openai.yaml"] == "ADD"
+    assert classifications["thinkroom-operate/SKILL.md"] == "EXACT"
+    assert install(target) == planned
+    assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
+    receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
+    assert len(receipt["files"]) == 6
+
+
+def test_skills_known_preprofile_receipt_can_be_uninstalled(tmp_path):
+    from thinkroom import skills as skill_module
+
+    target = tmp_path / "skills"
+    _seed_preprofile_skills(target)
+    skill_module.uninstall(target)
+    assert not list(target.glob("**/SKILL.md"))
+    assert not list(target.glob("**/openai.yaml"))
+    assert not (target / ".thinkroom/skills-receipt-v1.json").exists()
+
+
+def test_skills_known_preprofile_tamper_blocks_migration_without_mutation(tmp_path):
+    target = tmp_path / "skills"
+    _seed_preprofile_skills(target)
+    (target / "thinkroom-install/SKILL.md").write_bytes(b"tampered")
+    before = _skills_tree_snapshot(target)
+    with pytest.raises(ValueError, match="DIVERGED"):
+        install(target)
+    assert _skills_tree_snapshot(target) == before
+
+
+def test_skills_known_preprofile_migration_rolls_back_updates_and_adds(tmp_path, monkeypatch):
+    from thinkroom import skills as skill_module
+
+    target = tmp_path / "skills"
+    _seed_preprofile_skills(target)
+    before = _skills_tree_snapshot(target)
+    real_write = skill_module._atomic_write_at
+    calls = 0
+
+    def fail_second_write(parent_fd, name, data, expected):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected migration failure")
+        return real_write(parent_fd, name, data, expected)
+
+    monkeypatch.setattr(skill_module, "_atomic_write_at", fail_second_write)
+    with pytest.raises(OSError, match="injected migration failure"):
+        install(target)
+    assert _skills_tree_snapshot(target) == before
+
+
+@pytest.mark.parametrize("lineage", ["current", "preprofile"])
+@pytest.mark.parametrize("extra_location", ["receipt", "file"])
+@pytest.mark.parametrize("operation", ["install", "status", "uninstall"])
+def test_skills_receipts_reject_unknown_fields_without_mutation(
+    tmp_path, lineage, extra_location, operation
+):
+    from thinkroom import skills as skill_module
+
+    target = tmp_path / "skills"
+    if lineage == "current":
+        skill_module.install(target)
+    else:
+        _seed_preprofile_skills(target)
+    receipt = target / ".thinkroom/skills-receipt-v1.json"
+    data = json.loads(receipt.read_text())
+    if extra_location == "receipt":
+        data["unexpected_field"] = "rejected"
+    else:
+        data["files"][0]["unexpected_field"] = "rejected"
+    receipt.write_text(json.dumps(data, indent=2) + "\n")
+    before = _skills_tree_snapshot(target)
+
+    with pytest.raises(ValueError, match="invalid receipt"):
+        getattr(skill_module, operation)(target)
+
+    assert _skills_tree_snapshot(target) == before
+
+
+@pytest.mark.parametrize("name", ["new-payload", "skills-receipt-v1.json"])
+def test_skills_absent_original_rollback_preserves_racer(tmp_path, monkeypatch, name):
+    from thinkroom import skills as skill_module
+
+    parent = tmp_path / "managed"
+    parent.mkdir()
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    original = skill_module._Snapshot(None, None)
+    installed = skill_module._atomic_write_at(parent_fd, name, b"installed", original)
+    real_unlink = skill_module._unlink_at
+    injected = False
+
+    def unlink_then_race(parent_fd, target_name, expected):
+        nonlocal injected
+        real_unlink(parent_fd, target_name, expected)
+        if injected:
+            return
+        injected = True
+        racer_fd = os.open(
+            target_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        try:
+            os.write(racer_fd, b"racer")
+            os.fsync(racer_fd)
+        finally:
+            os.close(racer_fd)
+
+    monkeypatch.setattr(skill_module, "_unlink_at", unlink_then_race)
+    try:
+        skill_module._rollback_publish_at(parent_fd, name, installed, original)
+    finally:
+        os.close(parent_fd)
+
+    assert (parent / name).read_bytes() == b"racer"
 
 
 def test_skills_invalid_receipt_fails_before_any_target_mutation(tmp_path):

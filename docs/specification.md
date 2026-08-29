@@ -172,19 +172,25 @@ The distribution SHALL package three Agent Skills-compatible skills:
 2. `thinkroom-trigger`: open Thinkroom for consequential, uncertain, multi-hypothesis questions; avoid trivial, deterministic, or low-consequence prompts.
 3. `thinkroom-operate`: submit, poll, inspect, cancel, and interpret research jobs through stable public interfaces.
 
-`thinkroom skills install --target <skill-root>` SHALL plan and apply a managed projection with `ADD`, `EXACT`, and `DIVERGED` classifications, write a receipt, remain idempotent, and refuse to overwrite unmanaged or diverged targets without an explicit future conflict-resolution design. `status` and `uninstall` SHALL verify ownership and exact managed hashes. Skills SHALL contain no machine-local paths, secrets, or hidden dependency on the source checkout.
+`thinkroom skills install --target <skill-root>` SHALL plan and apply a managed projection with `ADD`, `EXACT`, `UPDATE`, and `DIVERGED` classifications, write a receipt, remain idempotent, and refuse to overwrite unmanaged or diverged targets. `UPDATE` is permitted only when an allowlisted previous receipt and every existing managed payload match their exact historical hashes; unknown receipt lineages, missing owned files, and modified payloads remain `DIVERGED` or invalid without mutation. The equivalent `--profile codex` and `--profile hermes` forms SHALL resolve to `$HOME/.agents/skills` and `$HERMES_HOME/skills` respectively, with Hermes defaulting to `$HOME/.hermes/skills`. Exactly one of `--profile` or `--target` is required. All forms SHALL use the same manifest, payloads, receipt, migration allowlist, and divergence policy; `status` and `uninstall` SHALL verify ownership and exact managed hashes. Skills SHALL contain no machine-local paths, secrets, or hidden dependency on the source checkout.
 
 The wheel SHALL contain this canonical bundle:
 
 ```text
 thinkroom/bundled_skills/
   manifest.json
-  thinkroom-install/SKILL.md
-  thinkroom-trigger/SKILL.md
-  thinkroom-operate/SKILL.md
+  thinkroom-install/
+    SKILL.md
+    agents/openai.yaml
+  thinkroom-trigger/
+    SKILL.md
+    agents/openai.yaml
+  thinkroom-operate/
+    SKILL.md
+    agents/openai.yaml
 ```
 
-Each `SKILL.md` starts at byte zero with Agent Skills YAML frontmatter containing `name`, a capability/trigger `description` no longer than 60 characters, semver `version`, human-first `author`, `license`, `platforms`, and tags, followed by a non-empty actionable body. `manifest.json` is schema versioned and contains bundle/product versions plus every managed payload file's POSIX-relative path and lowercase SHA-256; it explicitly excludes itself from the entry list. Paths must be unique, canonical, confined below the bundle root, and free of absolute paths or `..` components.
+Each `SKILL.md` starts at byte zero with Agent Skills YAML frontmatter containing `name`, a capability/trigger `description` no longer than 60 characters, semver `version`, human-first `author`, `license`, `platforms`, and tags, followed by a non-empty actionable body. Each optional `agents/openai.yaml` contains bounded Codex presentation and invocation-policy metadata but no machine-local executable path or provider credential. `manifest.json` is schema versioned and contains bundle/product versions plus every managed payload file's POSIX-relative path and lowercase SHA-256; it explicitly excludes itself from the entry list. Paths must be unique, canonical, confined below the bundle root, and free of absolute paths or `..` components.
 
 The installer validates the manifest syntax, the exact payload file set, and all payload hashes before planning. It rejects a symlinked target root, any symlink in a managed source/target path, path traversal, missing/extra payload files, duplicate paths, and malformed manifests or receipts before mutation. The receipt at `<skill-root>/.thinkroom/skills-receipt-v1.json` records receipt version, bundle version, SHA-256 of the exact manifest bytes, and each installed relative path and hash. Apply stages validated bytes and writes the receipt last; status compares manifest, receipt, and target bytes. Uninstall is all-or-nothing and removes only receipt-owned exact files; drift yields `DIVERGED` without deletion.
 
@@ -330,7 +336,7 @@ A clean POSIX/WSL environment can install the built package, start the native pr
 
 ### AC-009 — bundled Agent Skills
 
-The built distribution contains all three skills. In an isolated skill root, install reports `ADD`, repeat install reports `EXACT`, manual drift reports `DIVERGED` without overwrite, status verifies hashes, uninstall removes only exact managed files, and a fresh agent session can load the trigger and operation skills and choose Thinkroom for a qualifying prompt.
+The built distribution contains all three skills. In an isolated skill root, install reports `ADD`, repeat install reports `EXACT`, an exact allowlisted previous receipt reports `UPDATE`/`ADD` and migrates to `EXACT`, manual drift reports `DIVERGED` without overwrite, status verifies hashes, uninstall removes only exact managed files, and a fresh agent session can load the trigger and operation skills and choose Thinkroom for a qualifying prompt.
 
 ### AC-010 — production limits and ownership
 

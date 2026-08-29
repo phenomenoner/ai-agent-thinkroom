@@ -34,6 +34,20 @@ jobs:
           uv run ruff check .
           uv run mypy src scripts
           uv run pytest -q
+      - name: Build and verify the installed release candidate
+        run: |
+          RELEASE_DIR="$RUNNER_TEMP/thinkroom-release"
+          RUNTIME="$RUNNER_TEMP/thinkroom-runtime"
+          python scripts/build_release.py --out-dir "$RELEASE_DIR"
+          uv venv --python "$(command -v python)" "$RUNTIME"
+          uv pip install --python "$RUNTIME/bin/python" --require-hashes -r requirements-production.txt
+          uv pip install --python "$RUNTIME/bin/python" --no-deps "$RELEASE_DIR"/thinkroom-*-py3-none-any.whl
+          "$RUNTIME/bin/python" scripts/verify_locked_runtime.py uv.lock \
+            --write-manifest "$RUNNER_TEMP/thinkroom-runtime-lock.json"
+          "$RUNTIME/bin/python" scripts/verify_locked_runtime.py uv.lock \
+            --manifest "$RUNNER_TEMP/thinkroom-runtime-lock.json"
+          "$RUNTIME/bin/thinkroom" verify package
+          "$RUNTIME/bin/thinkroom" verify process
 
 # Docker is intentionally absent: it is operator-owned reference material,
 # not part of the native-process release contract.

@@ -4,6 +4,26 @@ All notable changes to Thinkroom are documented here.
 
 ## Unreleased
 
+### Added
+
+- Codex App and Hermes Agent installation profiles over one receipt-owned Agent Skills bundle.
+- Codex App `agents/openai.yaml` metadata without forking trigger or operation policy.
+- A host-integration guide covering Codex Windows/WSL config sharing and Hermes named profiles.
+
+### Changed
+
+- The managed Skills installer recognizes the exact pre-profile v0.2 receipt, adds Codex metadata,
+  updates changed owned payloads, and publishes the current receipt while preserving fail-closed
+  behavior for unknown, malformed, or modified installations and preserving concurrent replacements
+  during rollback.
+- Installed wheels expose `thinkroom verify package` and `thinkroom verify process`; CI builds the
+  deterministic candidate, installs its hash-locked closure, and runs both verification commands.
+
+### Security boundary
+
+- Prime RPC now has an independent 64 MB raw transport cap and 20,000-record ceiling in addition to
+  retained semantic/result limits.
+
 ## 0.2.0 — 2026-08-29
 
 ### Added

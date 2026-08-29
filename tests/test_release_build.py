@@ -289,6 +289,34 @@ def test_public_ci_uses_pinned_uv_action_without_persisted_checkout_credentials(
     assert "pip install uv" not in workflow
 
 
+def test_release_gate_installs_and_smokes_the_built_wheel():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    for required in (
+        "scripts/build_release.py --out-dir",
+        "--require-hashes -r requirements-production.txt",
+        "--no-deps",
+        "scripts/verify_locked_runtime.py uv.lock",
+        '"$RUNTIME/bin/thinkroom" verify package',
+        '"$RUNTIME/bin/thinkroom" verify process',
+    ):
+        assert required in workflow
+
+
+def test_release_smokes_are_available_from_the_installed_console_script():
+    cli = (ROOT / "src" / "thinkroom" / "cli.py").read_text()
+    verification = (ROOT / "src" / "thinkroom" / "verification.py").read_text()
+    readmes = [(ROOT / name).read_text() for name in ("README.md", "README.zh-TW.md")]
+
+    assert "verify_app" in cli
+    assert "def verify_package" in verification
+    assert "def verify_process" in verification
+    for readme in readmes:
+        assert "thinkroom verify package" in readme
+        assert "thinkroom verify process" in readme
+        assert "python scripts/smoke_package.py" not in readme
+        assert "python scripts/smoke_process.py" not in readme
+
+
 def test_public_docs_do_not_claim_a_pre_tag_signed_release():
     for relative in (
         "README.md",

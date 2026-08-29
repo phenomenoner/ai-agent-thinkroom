@@ -1,0 +1,6 @@
+interface:
+  display_name: "Thinkroom Install"
+  short_description: "Install and verify the managed Thinkroom skills bundle"
+  default_prompt: "Use $thinkroom-install to install, inspect, or remove Thinkroom skills safely."
+policy:
+  allow_implicit_invocation: false

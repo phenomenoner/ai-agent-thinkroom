@@ -40,12 +40,13 @@ The adapter independently bounds:
 
 - configuration and aggregate argv bytes;
 - RPC prompt bytes;
-- each LF-delimited JSONL event and total event count;
+- aggregate raw JSONL transport bytes, each LF-delimited event, and total event count;
 - retained control/result-event bytes;
 - terminal assistant bytes;
 - invocation time and process-settlement grace.
 
-High-volume progress/token telemetry is parsed but not retained as result evidence. Stderr is also
+High-volume progress/token telemetry is parsed but not retained as result evidence; it still consumes
+the independent raw transport budget. Stderr is also
 drained without retention so it cannot create backpressure, disclose diagnostics, or race a valid
 JSONL result; it is not provider-result evidence and does not decide success. Prompt rejection,
 invalid JSONL, wrong or missing child proof, failed assistant turns, bounded JSONL/result overflow,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
-from typing import TypeVar
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, TypeVar
 
 import typer
 import uvicorn
@@ -14,8 +17,35 @@ from .service import ThinkroomService
 
 app = typer.Typer(help="Thinkroom AI research")
 skills_app = typer.Typer(help="Manage Agent Skills")
+verify_app = typer.Typer(help="Verify an installed Thinkroom runtime")
 app.add_typer(skills_app, name="skills")
+app.add_typer(verify_app, name="verify")
 _T = TypeVar("_T")
+
+
+class AgentProfile(StrEnum):
+    CODEX = "codex"
+    HERMES = "hermes"
+
+
+def _skills_target(target: str | None, profile: AgentProfile | None) -> str:
+    if (target is None) == (profile is None):
+        raise typer.BadParameter("choose exactly one of --target or --profile")
+    if target is not None:
+        return target
+    assert profile is not None
+    if profile is AgentProfile.CODEX:
+        return str(Path.home() / ".agents" / "skills")
+    configured_hermes_home = os.environ.get("HERMES_HOME")
+    if configured_hermes_home is None:
+        hermes_home = Path.home() / ".hermes"
+    else:
+        if not configured_hermes_home:
+            raise typer.BadParameter("HERMES_HOME may not be empty")
+        hermes_home = Path(configured_hermes_home)
+        if not hermes_home.is_absolute():
+            raise typer.BadParameter("HERMES_HOME must be an absolute path")
+    return str(hermes_home / "skills")
 
 
 def _remote(operation: Callable[[], _T]) -> _T:  # noqa: UP047
@@ -89,25 +119,48 @@ def mcp() -> None:
 
 
 @skills_app.command("install")
-def skills_install(target: str = typer.Option(..., "--target")) -> None:
+def skills_install(
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    profile: Annotated[AgentProfile | None, typer.Option("--profile", case_sensitive=False)] = None,
+) -> None:
     from .skills import install
 
-    print(json.dumps(install(target), indent=2))
+    print(json.dumps(install(_skills_target(target, profile)), indent=2))
 
 
 @skills_app.command("status")
-def skills_status(target: str = typer.Option(..., "--target")) -> None:
+def skills_status(
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    profile: Annotated[AgentProfile | None, typer.Option("--profile", case_sensitive=False)] = None,
+) -> None:
     from .skills import status
 
-    print(json.dumps(status(target), indent=2))
+    print(json.dumps(status(_skills_target(target, profile)), indent=2))
 
 
 @skills_app.command("uninstall")
-def skills_uninstall(target: str = typer.Option(..., "--target")) -> None:
+def skills_uninstall(
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    profile: Annotated[AgentProfile | None, typer.Option("--profile", case_sensitive=False)] = None,
+) -> None:
     from .skills import uninstall
 
-    uninstall(target)
+    uninstall(_skills_target(target, profile))
     print("uninstalled")
+
+
+@verify_app.command("package")
+def verify_package_command() -> None:
+    from .verification import verify_package
+
+    print(json.dumps(verify_package(), sort_keys=True))
+
+
+@verify_app.command("process")
+def verify_process_command() -> None:
+    from .verification import verify_process
+
+    print(json.dumps(verify_process(), sort_keys=True))
 
 
 if __name__ == "__main__":

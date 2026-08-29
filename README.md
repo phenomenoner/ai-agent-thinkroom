@@ -132,7 +132,7 @@ uv run thinkroom research \
 
 The default service listens on `127.0.0.1:8787` and uses the deterministic `scripted` backend.
 
-## Install the bundled Agent Skills
+## Install for Codex App or Hermes Agent
 
 Thinkroom ships three managed Agent Skills:
 
@@ -142,32 +142,54 @@ Thinkroom ships three managed Agent Skills:
 | `thinkroom-operate` | submitting, polling, inspecting, cancelling, or interpreting a Thinkroom job through the CLI, REST API, or MCP. |
 | `thinkroom-install` | installing, checking, or removing the managed Thinkroom skill projection. |
 
-Install them into a compatible skill root, then verify the managed hashes:
+The runtime and skill bundle are universal; only the host registration differs. Install and verify
+the same managed bundle through the appropriate profile:
 
 ```bash
-uv run thinkroom skills install --target ~/.hermes/skills
-uv run thinkroom skills status --target ~/.hermes/skills
+# Codex App / CLI / IDE
+uv run thinkroom skills install --profile codex
+uv run thinkroom skills status --profile codex
+
+# Hermes Agent default profile
+unset HERMES_HOME
+uv run thinkroom skills install --profile hermes
+uv run thinkroom skills status --profile hermes
 ```
 
+Codex resolves to `$HOME/.agents/skills`; Hermes resolves to `$HERMES_HOME/skills`, defaulting to
+`~/.hermes/skills`. Use `--target <absolute-skill-root>` for another Agent Skills-compatible host.
 The installer is idempotent and refuses to overwrite unmanaged or diverged files.
 
-## Connect Thinkroom to Hermes through MCP
+## Connect through MCP
 
-Start the service, then register Thinkroom’s stdio MCP server:
+Start the service, then register the same stdio MCP server in the selected host.
 
-```bash
-hermes mcp add thinkroom --command "$(pwd)/.venv/bin/thinkroom" --args mcp
-hermes mcp test thinkroom
-```
-
-Start a fresh Hermes session or reload MCP discovery after configuration. Hermes exposes the registered tools with the `mcp_thinkroom_` prefix.
-
-If port `8787` is already in use, run the service on another loopback port and pass the matching endpoint to the MCP subprocess:
+Codex App/CLI/IDE:
 
 ```bash
-THINKROOM_PORT=18788 uv run thinkroom serve
-THINKROOM_ENDPOINT=http://127.0.0.1:18788 uv run thinkroom mcp
+codex mcp add thinkroom \
+  --env THINKROOM_ENDPOINT=http://127.0.0.1:8787 \
+  -- /absolute/path/to/thinkroom mcp
+codex mcp list
 ```
+
+Hermes Agent default profile:
+
+```bash
+hermes --profile default mcp add thinkroom \
+  --command /absolute/path/to/thinkroom \
+  --env THINKROOM_ENDPOINT=http://127.0.0.1:8787 \
+  --args mcp
+hermes --profile default mcp test thinkroom
+```
+
+Accept the interactive prompt to enable all four discovered Thinkroom tools, then start a fresh Hermes session.
+For a named profile, export `HERMES_HOME="$HOME/.hermes/profiles/<profile-name>"` for every
+Thinkroom Skills command and replace `default` above with that exact Hermes profile name.
+On Windows, the production Codex App profile runs the agent and Thinkroom inside WSL2. Windows App
+and WSL CLI use different Codex homes by default, so their shared MCP configuration must be selected
+explicitly. See [Installation and agent integration](docs/INSTALLATION.md) for the exact Codex
+Windows/WSL and Hermes profile procedures.
 
 ## Provider backends
 
@@ -238,8 +260,8 @@ Docker is optional operator-owned reference material, not part of the v0.2 nativ
 After installing the wheel:
 
 ```bash
-python scripts/smoke_package.py
-python scripts/smoke_process.py
+thinkroom verify package
+thinkroom verify process
 ```
 
 Repository contributors should run the complete gates documented in [AGENTS.md](AGENTS.md).
@@ -249,9 +271,11 @@ Repository contributors should run the complete gates documented in [AGENTS.md](
 - [Product concept and design philosophy](thinkroom_ai_think_tank_product_concept.md)
 - [Product specification](docs/specification.md)
 - [Operations](docs/OPERATIONS.md)
+- [Installation and agent integration](docs/INSTALLATION.md)
 - [Security policy](SECURITY.md)
 - [Architecture decision: modular monolith](docs/adr/0001-modular-monolith.md)
 - [Architecture decision: native process release authority](docs/adr/0002-native-process-release-authority.md)
+- [Architecture decision: agent host integration profiles](docs/adr/0004-agent-host-integration-profiles.md)
 - [Architecture decision: bounded Prime Agent RLM RPC](docs/adr/0003-prime-agent-rlm-rpc.md)
 
 ## License

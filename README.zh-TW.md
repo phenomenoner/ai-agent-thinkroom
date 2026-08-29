@@ -132,7 +132,7 @@ uv run thinkroom research \
 
 服務預設監聽 `127.0.0.1:8787`，並使用 deterministic `scripted` backend。
 
-## 安裝內附 Agent Skills
+## 安裝到 Codex App 或 Hermes Agent
 
 Thinkroom 內含三個受管理的 Agent Skills：
 
@@ -142,32 +142,54 @@ Thinkroom 內含三個受管理的 Agent Skills：
 | `thinkroom-operate` | 透過 CLI、REST API 或 MCP 送出、輪詢、檢查、取消或解讀 Thinkroom 工作。 |
 | `thinkroom-install` | 安裝、檢查或移除受管理的 Thinkroom skill 投影。 |
 
-將它們安裝到相容的 skill root，接著驗證受管理檔案的 hash：
+Runtime 與 skill bundle 共用同一份權威；只有 host registration 分流。請依 agent profile 安裝並驗證同一份受管理 bundle：
 
 ```bash
-uv run thinkroom skills install --target ~/.hermes/skills
-uv run thinkroom skills status --target ~/.hermes/skills
+# Codex App / CLI / IDE
+uv run thinkroom skills install --profile codex
+uv run thinkroom skills status --profile codex
+
+# Hermes Agent default profile
+unset HERMES_HOME
+uv run thinkroom skills install --profile hermes
+uv run thinkroom skills status --profile hermes
 ```
 
-安裝器具備冪等性，而且不會覆寫未受管理或已分歧的檔案。
+Codex profile 解析到 `$HOME/.agents/skills`；Hermes profile 解析到
+`$HERMES_HOME/skills`，未設定時預設為 `~/.hermes/skills`。其他相容host可使用
+`--target <absolute-skill-root>`。安裝器具備冪等性，而且不會覆寫未受管理或已分歧的檔案。
 
-## 透過 MCP 連接 Hermes
+## 透過 MCP 連接
 
-先啟動服務，再註冊 Thinkroom 的 stdio MCP server：
+先啟動服務，再將同一個 Thinkroom stdio MCP server註冊到所選host。
+
+Codex App／CLI／IDE：
 
 ```bash
-hermes mcp add thinkroom --command "$(pwd)/.venv/bin/thinkroom" --args mcp
-hermes mcp test thinkroom
+codex mcp add thinkroom \
+  --env THINKROOM_ENDPOINT=http://127.0.0.1:8787 \
+  -- /absolute/path/to/thinkroom mcp
+codex mcp list
 ```
 
-完成設定後，請開啟新的 Hermes session 或重新載入 MCP discovery。Hermes 會以 `mcp_thinkroom_` 前綴公開這些工具。
-
-若 `8787` 已被占用，請改用另一個 loopback port，並讓 MCP subprocess 指向相同 endpoint：
+Hermes Agent default profile：
 
 ```bash
-THINKROOM_PORT=18788 uv run thinkroom serve
-THINKROOM_ENDPOINT=http://127.0.0.1:18788 uv run thinkroom mcp
+hermes --profile default mcp add thinkroom \
+  --command /absolute/path/to/thinkroom \
+  --env THINKROOM_ENDPOINT=http://127.0.0.1:8787 \
+  --args mcp
+hermes --profile default mcp test thinkroom
 ```
+
+請在互動提示中啟用所發現的四個Thinkroom tools；接著開啟新的Hermes session或重新載入MCP discovery。
+Named profile必須在每個Thinkroom Skills命令前設定
+`HERMES_HOME="$HOME/.hermes/profiles/<profile-name>"`，並將上述`default`換成同一個
+Hermes profile名稱。
+
+Windows上的正式Codex App profile會讓agent與Thinkroom都在WSL2執行。Windows App與WSL CLI
+預設使用不同的Codex home，因此必須明確選擇共享MCP設定。完整的Codex Windows/WSL與Hermes
+profile步驟請見[安裝與Agent整合](docs/INSTALLATION.md)。
 
 ## Provider backends
 
@@ -238,8 +260,8 @@ Docker 是由 operator 自行負責的參考資料，不屬於 v0.2 native relea
 安裝 wheel 後執行：
 
 ```bash
-python scripts/smoke_package.py
-python scripts/smoke_process.py
+thinkroom verify package
+thinkroom verify process
 ```
 
 Repo contributor 應執行 [AGENTS.md](AGENTS.md) 所列的完整 gates。
@@ -249,10 +271,12 @@ Repo contributor 應執行 [AGENTS.md](AGENTS.md) 所列的完整 gates。
 - [產品概念與設計哲學](thinkroom_ai_think_tank_product_concept.md)
 - [產品規格](docs/specification.md)
 - [維運說明](docs/OPERATIONS.md)
+- [安裝與 Agent 整合](docs/INSTALLATION.md)
 - [架構決策：有界的 Prime Agent RLM RPC](docs/adr/0003-prime-agent-rlm-rpc.md)
 - [安全政策](SECURITY.md)
 - [架構決策：modular monolith](docs/adr/0001-modular-monolith.md)
 - [架構決策：native process release authority](docs/adr/0002-native-process-release-authority.md)
+- [架構決策：Agent host integration profiles](docs/adr/0004-agent-host-integration-profiles.md)
 
 ## 授權
 

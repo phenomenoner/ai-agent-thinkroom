@@ -13,6 +13,22 @@ from typing import Any
 
 BUNDLE = Path(__file__).parent / "bundled_skills"
 RECEIPT_REL = Path(".thinkroom/skills-receipt-v1.json")
+_KNOWN_PREVIOUS_RECEIPTS = {
+    "8544d4efad9b1d605b8cd3e9706ba94963286a12d617809f79fdd50ae92cc9a5": {
+        "bundle_version": "0.2.0",
+        "files": {
+            "thinkroom-install/SKILL.md": (
+                "77cbe74de042bdd473144c0799a8dfa89363b1bc2254703d67bfefc1ec6b52fd"
+            ),
+            "thinkroom-operate/SKILL.md": (
+                "6d905d1e84bfd0244d5f264d66f3e58ca7b8d0f997bd51676f76b971c08601d8"
+            ),
+            "thinkroom-trigger/SKILL.md": (
+                "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
+            ),
+        },
+    }
+}
 
 
 def _manifest() -> tuple[dict[str, Any], bytes, dict[str, bytes]]:
@@ -117,25 +133,30 @@ def _preflight_install(
         _preflight_managed_path(root, relative)
     receipt = root / RECEIPT_REL
     receipt_exists = receipt.exists()
+    receipt_files: dict[str, str] = {}
     if receipt_exists:
         try:
             raw_receipt = receipt.read_bytes()
         except OSError as exc:
             raise ValueError("invalid receipt") from exc
-        _validate_receipt_bytes(raw_receipt, manifest, raw_manifest)
+        receipt_data = _validate_receipt_bytes(raw_receipt, manifest, raw_manifest)
+        receipt_files = {item["path"]: item["sha256"] for item in receipt_data["files"]}
     classifications: list[dict[str, str]] = []
     for entry in manifest["entries"]:
         destination = _target_path(root, entry["path"])
-        if not destination.exists():
-            state = "DIVERGED" if receipt_exists else "ADD"
-        elif not receipt_exists:
+        previous_digest = receipt_files.get(entry["path"])
+        if not receipt_exists:
+            state = "DIVERGED" if destination.exists() else "ADD"
+        elif previous_digest is None:
+            state = "DIVERGED" if destination.exists() else "ADD"
+        elif not destination.exists():
             state = "DIVERGED"
         else:
-            state = (
-                "EXACT"
-                if hashlib.sha256(destination.read_bytes()).hexdigest() == entry["sha256"]
-                else "DIVERGED"
-            )
+            actual_digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if actual_digest != previous_digest:
+                state = "DIVERGED"
+            else:
+                state = "EXACT" if previous_digest == entry["sha256"] else "UPDATE"
         classifications.append({"path": entry["path"], "classification": state})
     return classifications
 
@@ -552,6 +573,34 @@ def _restore_at(parent_fd: int, name: str, original: _Snapshot) -> None:
     _atomic_write_at(parent_fd, name, original.data, current)
 
 
+def _replace_at(parent_fd: int, name: str, data: bytes, expected: _Snapshot) -> _Snapshot:
+    if expected.data is None:
+        raise ValueError("managed file is missing")
+    _unlink_at(parent_fd, name, expected)
+    try:
+        return _atomic_write_at(parent_fd, name, data, _Snapshot(None, None))
+    except BaseException:
+        try:
+            _restore_at(parent_fd, name, expected)
+        except BaseException as cleanup_exc:
+            raise RuntimeError("failed to roll back replaced Skills payload") from cleanup_exc
+        raise
+
+
+def _rollback_publish_at(
+    parent_fd: int,
+    name: str,
+    installed: _Snapshot,
+    original: _Snapshot,
+) -> None:
+    if not _same_snapshot(_snapshot_at(parent_fd, name), installed):
+        raise ValueError("refusing to overwrite changed managed file during rollback")
+    _unlink_at(parent_fd, name, installed)
+    if original.data is None:
+        return
+    _restore_at(parent_fd, name, original)
+
+
 def _validate_receipt_bytes(
     raw_receipt: bytes, manifest: dict[str, Any], raw_manifest: bytes
 ) -> dict[str, Any]:
@@ -561,21 +610,36 @@ def _validate_receipt_bytes(
         raise ValueError("invalid receipt") from exc
     if not isinstance(data, dict):
         raise ValueError("invalid receipt")
+    if set(data) != {"receipt_version", "bundle_version", "manifest_sha256", "files"}:
+        raise ValueError("invalid receipt")
     expected = {e["path"]: e["sha256"] for e in manifest["entries"]}
     files = data.get("files")
-    if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
+    if not isinstance(files, list) or not all(
+        isinstance(item, dict) and set(item) == {"path", "sha256"} for item in files
+    ):
         raise ValueError("invalid receipt")
     receipt_paths = [item.get("path") for item in files]
     actual = {item.get("path"): item.get("sha256") for item in files}
     receipt_paths_valid = all(isinstance(path, str) for path in receipt_paths)
+    manifest_sha256 = data.get("manifest_sha256")
+    current_manifest_sha256 = hashlib.sha256(raw_manifest).hexdigest()
+    previous = (
+        _KNOWN_PREVIOUS_RECEIPTS.get(manifest_sha256) if isinstance(manifest_sha256, str) else None
+    )
+    authority_matches = (
+        data.get("bundle_version") == manifest.get("bundle_version")
+        and manifest_sha256 == current_manifest_sha256
+        and actual == expected
+    ) or (
+        previous is not None
+        and data.get("bundle_version") == previous["bundle_version"]
+        and actual == previous["files"]
+    )
     if (
         not receipt_paths_valid
         or len(receipt_paths) != len(set(receipt_paths))
-        or set(receipt_paths) != set(expected)
         or data.get("receipt_version") != "1"
-        or data.get("bundle_version") != manifest.get("bundle_version")
-        or data.get("manifest_sha256") != hashlib.sha256(raw_manifest).hexdigest()
-        or actual != expected
+        or not authority_matches
     ):
         raise ValueError("invalid receipt")
     return data
@@ -606,7 +670,7 @@ def install(target: str | Path) -> list[dict[str, str]]:
     tree = _SecureTree(root, create=True)
     records: dict[str, tuple[int, str, _Snapshot]] = {}
     accepted: dict[str, _Snapshot] = {}
-    applied: list[tuple[str, _Snapshot]] = []
+    applied: list[tuple[str, _Snapshot, _Snapshot]] = []
     receipt_rel = RECEIPT_REL.as_posix()
     managed = [*[e["path"] for e in manifest["entries"]], receipt_rel]
     try:
@@ -618,22 +682,31 @@ def install(target: str | Path) -> list[dict[str, str]]:
             else:
                 accepted[relative] = _snapshot_at(parent_fd, name)
         receipt_snapshot = accepted[receipt_rel]
+        receipt_data: dict[str, Any] | None = None
         if receipt_snapshot.data is not None:
-            _validate_receipt_bytes(receipt_snapshot.data, manifest, raw)
+            receipt_data = _validate_receipt_bytes(receipt_snapshot.data, manifest, raw)
         receipt_exists = receipt_snapshot.data is not None
+        receipt_files = (
+            {item["path"]: item["sha256"] for item in receipt_data["files"]}
+            if receipt_data is not None
+            else {}
+        )
         classifications = []
         for entry in manifest["entries"]:
             snapshot = accepted[entry["path"]]
-            if snapshot.data is not None and not receipt_exists:
-                state = "DIVERGED"
+            previous_digest = receipt_files.get(entry["path"])
+            if not receipt_exists:
+                state = "DIVERGED" if snapshot.data is not None else "ADD"
+            elif previous_digest is None:
+                state = "DIVERGED" if snapshot.data is not None else "ADD"
             elif snapshot.data is None:
-                state = "DIVERGED" if receipt_exists else "ADD"
+                state = "DIVERGED"
             else:
-                state = (
-                    "EXACT"
-                    if hashlib.sha256(snapshot.data).hexdigest() == entry["sha256"]
-                    else "DIVERGED"
-                )
+                actual_digest = hashlib.sha256(snapshot.data).hexdigest()
+                if actual_digest != previous_digest:
+                    state = "DIVERGED"
+                else:
+                    state = "EXACT" if previous_digest == entry["sha256"] else "UPDATE"
             classifications.append({"path": entry["path"], "classification": state})
         if classifications != preflight or any(
             item["classification"] == "DIVERGED" for item in classifications
@@ -663,18 +736,22 @@ def install(target: str | Path) -> list[dict[str, str]]:
         staged = [(entry["path"], payloads[entry["path"]]) for entry in manifest["entries"]]
         for relative, data in [*staged, (receipt_rel, receipt_bytes)]:
             parent_fd, name, snapshot = records[relative]
-            if snapshot.data is not None:
+            if snapshot.data == data:
                 continue
-            installed = _atomic_write_at(parent_fd, name, data, snapshot)
-            applied.append((relative, installed))
+            installed = (
+                _atomic_write_at(parent_fd, name, data, snapshot)
+                if snapshot.data is None
+                else _replace_at(parent_fd, name, data, snapshot)
+            )
+            applied.append((relative, installed, snapshot))
         tree.verify()
         return classifications
     except BaseException:
         rollback_error: BaseException | None = None
-        for relative, installed in reversed(applied):
+        for relative, installed, original in reversed(applied):
             parent_fd, name, _ = records[relative]
             try:
-                _unlink_at(parent_fd, name, installed)
+                _rollback_publish_at(parent_fd, name, installed, original)
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
