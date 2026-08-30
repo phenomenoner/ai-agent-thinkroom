@@ -29,10 +29,15 @@ For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recip
 - exactly one IPython `tool_execution_start` whose normalized code exactly matches the supplied
   cleanup recipe; and
 - a later, non-error IPython `tool_execution_end` with the same bounded `toolCallId` whose result
-  content contains the expected marker as one complete output line.
+  content contains the expected marker as one complete output line;
+- a later standalone terminal assistant `message_end`; and
+- an `agent_end` transcript whose final assistant text matches that observed terminal and whose only
+  child custody message is the one matching the requested child.
 
 Cleanup before child custody, duplicate/replayed cleanup calls or results, and a marker without the
-matching executed recipe are rejected. Existing prompt admission, child relationship/name,
+matching executed recipe are rejected. An aggregate-only terminal, a repeated or unexpected aggregate
+child, and any mismatch between the post-cleanup terminal event and the final aggregate transcript are
+also rejected. Existing prompt admission, child relationship/name,
 child-before-parent, schema, transport, timeout, cancellation, and process-group settlement gates
 remain in force.
 

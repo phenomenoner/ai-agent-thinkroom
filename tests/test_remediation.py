@@ -1779,6 +1779,8 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
         "'details': {'message': 'child done', 'fromRelationship': 'child', "
@@ -1873,6 +1875,8 @@ async def test_prime_backend_projects_terminal_result_before_response_byte_limit
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'assistant', 'content': 'x' * 70000, 'stopReason': 'stop'},"
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
@@ -1927,6 +1931,8 @@ async def test_prime_backend_rejects_cleanup_marker_from_different_tool_call(tmp
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
         "'details': {'message': 'child done', 'fromRelationship': 'child', "
@@ -2056,6 +2062,80 @@ async def test_prime_backend_rejects_cleanup_order_and_replay(
     assert message in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        ("aggregate-pre-cleanup-terminal", "after RLM child cleanup"),
+        ("aggregate-post-cleanup-child", "after RLM child cleanup"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_prime_backend_reconciles_aggregate_terminal_and_child_order(
+    tmp_path, monkeypatch, scenario, message
+):
+    executable = tmp_path / "prime-invalid-aggregate-order"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "response = {'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}\n"
+        "child_message = {'role': 'custom', 'customType': 'agent_message', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}}\n"
+        "child = {'type': 'message_end', 'message': child_message}\n"
+        "start = {'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}\n"
+        "end = {'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']})\n"
+        "terminal_message = {'role': 'assistant', 'content': "
+        "[{'type': 'text', 'text': result}], 'stopReason': 'stop'}\n"
+        "unexpected_child = {'role': 'custom', 'customType': 'agent_message', "
+        "'details': {'message': 'late child', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'unexpected-worker'}}}\n"
+        "print(json.dumps(response), flush=True)\n"
+        "print(json.dumps(child), flush=True)\n"
+        "print(json.dumps(start), flush=True)\n"
+        "print(json.dumps(end), flush=True)\n"
+        "messages = [child_message, terminal_message]\n"
+        "if os.environ['SCENARIO'] == 'aggregate-post-cleanup-child':\n"
+        "    print(json.dumps({'type': 'message_end', 'message': terminal_message}), flush=True)\n"
+        "    messages.append(unexpected_child)\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': messages}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("SCENARIO", scenario)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000).invoke(
+            request
+        )
+
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert message in str(caught.value)
+
+
 @pytest.mark.asyncio
 async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection(
     tmp_path, monkeypatch
@@ -2129,6 +2209,8 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
         "'details': {'message': 'child done', 'fromRelationship': 'child', "
@@ -2140,7 +2222,7 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
     executable.chmod(0o755)
     monkeypatch.setenv("PID_FILE", str(pid_file))
     monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1_000_000)
-    monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 6)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 7)
     request = BackendRequestV1(
         phase="frame",
         job_id="j",
@@ -2202,6 +2284,8 @@ async def test_prime_backend_discards_stderr_without_overriding_valid_result(tmp
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
         "'details': {'message': 'child done', 'fromRelationship': 'child', "
@@ -2297,6 +2381,9 @@ async def test_prime_backend_uses_strict_lf_jsonl_and_only_accepts_answer_after_
         "final = json.dumps({'schema_version':1,'decision':'after\\u2028child','scope':'s',"
         "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
         "'research_questions':['q']}, ensure_ascii=False)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': final}], 'stopReason': 'stop'}}, "
+        "ensure_ascii=False), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'assistant', 'content': [{'type': 'text', 'text': early}], "
         "'stopReason': 'stop'},"

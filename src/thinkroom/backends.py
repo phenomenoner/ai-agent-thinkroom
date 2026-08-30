@@ -560,6 +560,7 @@ class PrimeAgentBackend:
                 child_message_received = False
                 cleanup_tool_call_id: str | None = None
                 cleanup_observed = False
+                post_cleanup_terminal_text: str | None = None
 
                 def is_child_message(message: object) -> bool:
                     if not isinstance(message, dict):
@@ -686,8 +687,8 @@ class PrimeAgentBackend:
                                 "Prime Agent emitted child custody after RLM child cleanup",
                             )
                         child_message_received = child_message_received or matched_child
+                        text = assistant_text(message)
                         if child_message_received and not cleanup_observed and not matched_child:
-                            text = assistant_text(message)
                             if text is not None:
                                 try:
                                     parse_json_object(text)
@@ -698,6 +699,14 @@ class PrimeAgentBackend:
                                         "MALFORMED_PROVIDER_OUTPUT",
                                         "Prime Agent emitted final JSON before RLM child cleanup",
                                     )
+                        elif cleanup_observed and text is not None:
+                            parse_json_object(text)
+                            if post_cleanup_terminal_text is not None:
+                                raise BackendError(
+                                    "MALFORMED_PROVIDER_OUTPUT",
+                                    "Prime Agent emitted multiple terminal messages after RLM child cleanup",
+                                )
+                            post_cleanup_terminal_text = text
                         continue
                     ipython_code = _prime_ipython_code(event)
                     if cleanup_observed and event.get("type") in {
@@ -773,6 +782,14 @@ class PrimeAgentBackend:
                         for index, message in enumerate(messages)
                         if child_message_matches(message)
                     ]
+                    child_indexes = [
+                        index for index, message in enumerate(messages) if is_child_message(message)
+                    ]
+                    if child_indexes != matching_child_indexes or len(matching_child_indexes) != 1:
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent emitted child custody after RLM child cleanup",
+                        )
                     child_message_received = child_message_received or bool(matching_child_indexes)
                     if (
                         not prompt_accepted
@@ -797,6 +814,14 @@ class PrimeAgentBackend:
                         raise BackendError(
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC omitted the terminal assistant message",
+                        )
+                    if (
+                        post_cleanup_terminal_text is None
+                        or final_text != post_cleanup_terminal_text
+                    ):
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent did not prove a terminal assistant message after RLM child cleanup",
                         )
                     if len(final_text.encode("utf-8")) > self.max_response_bytes:
                         raise BackendError(

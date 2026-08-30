@@ -163,6 +163,8 @@ async def test_prime_result_settles_when_descendant_keeps_stderr_open(tmp_path) 
         "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
         "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
         "'details': {'message': 'child done', 'fromRelationship': 'child', "

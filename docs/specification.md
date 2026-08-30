@@ -150,10 +150,13 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   `agent_message`, then an exact IPython cleanup recipe boundedly polls for that named child's
   completed status, rejects any unexpected direct child, removes it from the parent registry,
   confirms the invocation-local direct-child registry is empty, and emits the expected cleanup marker
-  from that same correlated tool call, and finally a later terminal assistant message appears. Cleanup
-  before child custody, an unexpected sibling child, duplicate/replayed cleanup calls or results,
-  any post-cleanup tool execution or child custody, and a marker without the matching executed recipe
-  and `toolCallId` are not cleanup evidence. Coding context is bounded
+  from that same correlated tool call, and finally a later terminal assistant `message_end` appears
+  and matches the terminal message in `agent_end`. The aggregate transcript SHALL contain exactly one
+  child message, from the requested child, and SHALL be reconciled with the observed cleanup and
+  terminal order before accepting JSON. Cleanup before child custody, an unexpected or repeated child,
+  duplicate/replayed cleanup calls or results, any post-cleanup tool execution or child custody, an
+  aggregate-only terminal message, and a marker without the matching executed recipe and `toolCallId`
+  are not cleanup evidence. Coding context is bounded
   request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.
 - Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,

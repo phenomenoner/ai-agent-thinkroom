@@ -12,13 +12,18 @@ All notable changes to Thinkroom are documented here.
 
 ### Changed
 
+- Prime Agent availability failures can use one explicitly configured sequential fallback while
+  preserving per-call audit evidence, cancellation/deadline boundaries, attempt policy identity, and
+  fail-closed interrupted-call recovery.
 - The MCP research tool now exposes question/context bounds, the exact domain enum, and branch-count
   bounds in its callable schema; the operation skill maps descriptive research categories to the
   `generic` default and preflights idempotency keys before submission. Managed skill migration also
   recognizes the exact CRLF form of the historical text-only v0.2 Windows checkout.
 - Prime/RLM phases now delete the completed named child from the parent registry after child-message
   custody and before accepting terminal phase JSON; a matching executed cleanup recipe and marker are
-  required. This is a bounded lifecycle workaround, not a producer-side RPC transport fix.
+  required. Terminal acceptance also reconciles a post-cleanup standalone assistant event with the
+  aggregate transcript and rejects aggregate-only or unexpected child custody. This is a bounded
+  lifecycle workaround, not a producer-side RPC transport fix.
 - The managed Skills installer recognizes the exact pre-profile v0.2 receipt, adds Codex metadata,
   updates changed owned payloads, and publishes the current receipt while preserving fail-closed
   behavior for unknown, malformed, or modified installations and preserving concurrent replacements
