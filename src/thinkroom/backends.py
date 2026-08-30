@@ -283,6 +283,84 @@ def _validate_prime_argv_setting(
 
 _PRIME_RPC_RAW_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
+_PRIME_CHILD_CLEANUP_MARKER_PREFIX = "THINKROOM_CHILD_CLEANED:"
+
+
+def _prime_child_cleanup_marker(child_name: str) -> str:
+    return f"{_PRIME_CHILD_CLEANUP_MARKER_PREFIX}{child_name}"
+
+
+def _prime_child_cleanup_recipe(child_name: str) -> str:
+    marker = _prime_child_cleanup_marker(child_name)
+    return "\n".join(
+        [
+            "import asyncio as _asyncio",
+            "_child = None",
+            "for _poll in range(30):",
+            "    _children = await rlm.list_subagents()",
+            f"    if any(c.session_name != {child_name!r} for c in _children):",
+            "        raise RuntimeError('unexpected direct Prime RLM child')",
+            f"    _matches = [c for c in _children if c.session_name == {child_name!r}]",
+            "    if len(_matches) > 1:",
+            "        raise RuntimeError('multiple matching Thinkroom RLM children')",
+            "    if len(_matches) == 1 and _matches[0].status == 'completed':",
+            "        _child = _matches[0]",
+            "        break",
+            "    if len(_matches) == 1 and _matches[0].status == 'error':",
+            "        raise RuntimeError('Thinkroom RLM child failed before cleanup')",
+            "    await _asyncio.sleep(1)",
+            "if _child is None:",
+            "    raise RuntimeError('Thinkroom RLM child did not complete before cleanup deadline')",
+            "await rlm.delete_subagent(_child)",
+            "for _poll in range(20):",
+            "    _remaining = await rlm.list_subagents()",
+            "    if not _remaining:",
+            "        break",
+            f"    if any(c.session_name != {child_name!r} for c in _remaining):",
+            "        raise RuntimeError('unexpected direct Prime RLM child after cleanup')",
+            "    await _asyncio.sleep(0.1)",
+            "else:",
+            "    raise RuntimeError('Thinkroom RLM child cleanup was not confirmed')",
+            f"print({marker!r})",
+        ]
+    )
+
+
+def _prime_ipython_code(event: dict[str, Any]) -> str | None:
+    if event.get("type") != "tool_execution_start" or event.get("toolName") != "ipython":
+        return None
+    args = event.get("args")
+    if not isinstance(args, dict):
+        return None
+    code = args.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _prime_tool_result_contains(event: dict[str, Any], expected: str, tool_call_id: str) -> bool:
+    if (
+        event.get("type") != "tool_execution_end"
+        or event.get("toolName") != "ipython"
+        or event.get("toolCallId") != tool_call_id
+        or event.get("isError") is not False
+    ):
+        return False
+    result = event.get("result")
+    texts: list[str] = []
+    if isinstance(result, str):
+        texts.append(result)
+    elif isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(
+                item["text"]
+                for item in content[:128]
+                if isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            )
+    return any(expected in text.splitlines() for text in texts)
 
 
 class PrimeAgentBackend:
@@ -391,6 +469,8 @@ class PrimeAgentBackend:
             "be concise, emit no prose, and include only schema fields."
         )
         child_name = f"thinkroom-{request.phase}-worker"
+        cleanup_recipe = _prime_child_cleanup_recipe(child_name)
+        cleanup_marker = _prime_child_cleanup_marker(child_name)
         provider_request = json.dumps(payload, ensure_ascii=False)
         prompt = (
             "Act only as a structured Thinkroom research provider. Do not read or write files, "
@@ -400,8 +480,11 @@ class PrimeAgentBackend:
             "it to solve the requested research phase independently, then send its findings to "
             "the parent with agent_message.send(receiver_role='parent'). End the first turn after "
             "showing the admission handle. Do not invent or infer the child response. Only after a "
-            "real child agent_message arrives, synthesize and return exactly one JSON object that "
-            "matches output_json_schema, with no markdown or prose.\n\n"
+            "real child agent_message arrives, execute this exact cleanup recipe in one ipython tool "
+            "call before producing the final JSON:\n"
+            f"```python\n{cleanup_recipe}\n```\n"
+            "Only after the cleanup marker is printed, synthesize and return exactly one JSON object "
+            "that matches output_json_schema, with no markdown or prose.\n\n"
             f"PROVIDER_REQUEST_JSON:\n{provider_request}"
         )
         if len(prompt.encode("utf-8")) > 65536:
@@ -472,8 +555,10 @@ class PrimeAgentBackend:
                 event_count = 0
                 prompt_accepted = False
                 child_message_received = False
+                cleanup_tool_call_id: str | None = None
+                cleanup_observed = False
 
-                def child_message_matches(message: object) -> bool:
+                def is_child_message(message: object) -> bool:
                     if not isinstance(message, dict):
                         return False
                     details = message.get("details")
@@ -484,13 +569,24 @@ class PrimeAgentBackend:
                         and isinstance(details, dict)
                         and details.get("fromRelationship") == "child"
                         and isinstance(sender, dict)
-                        and sender.get("sessionName") == child_name
                     )
+
+                def child_message_matches(message: object) -> bool:
+                    if not is_child_message(message) or not isinstance(message, dict):
+                        return False
+                    details = message.get("details")
+                    if not isinstance(details, dict):
+                        return False
+                    sender = details.get("from")
+                    return isinstance(sender, dict) and sender.get("sessionName") == child_name
 
                 def assistant_text(message: object) -> str | None:
                     if not isinstance(message, dict) or message.get("role") != "assistant":
                         return None
-                    if message.get("stopReason") not in {None, "stop"}:
+                    stop_reason = message.get("stopReason")
+                    if stop_reason == "toolUse":
+                        return None
+                    if stop_reason not in {None, "stop"}:
                         raise BackendError("PROVIDER_ERROR", "Prime Agent assistant turn failed")
                     content = message.get("content")
                     if isinstance(content, str):
@@ -560,10 +656,106 @@ class PrimeAgentBackend:
                             )
                         prompt_accepted = True
                         continue
-                    if event.get("type") == "message_end":
+                    if (
+                        event.get("type") == "custom_message"
+                        and event.get("customType") == "agent_message"
+                    ):
+                        child_event = {
+                            "role": "custom",
+                            "customType": "agent_message",
+                            "details": event.get("details"),
+                        }
+                        if cleanup_observed and is_child_message(child_event):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted child custody after RLM child cleanup",
+                            )
                         child_message_received = child_message_received or child_message_matches(
-                            event.get("message")
+                            child_event
                         )
+                        continue
+                    if event.get("type") == "message_end":
+                        message = event.get("message")
+                        matched_child = child_message_matches(message)
+                        if cleanup_observed and is_child_message(message):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted child custody after RLM child cleanup",
+                            )
+                        child_message_received = child_message_received or matched_child
+                        if child_message_received and not cleanup_observed and not matched_child:
+                            text = assistant_text(message)
+                            if text is not None:
+                                try:
+                                    parse_json_object(text)
+                                except BackendError:
+                                    pass
+                                else:
+                                    raise BackendError(
+                                        "MALFORMED_PROVIDER_OUTPUT",
+                                        "Prime Agent emitted final JSON before RLM child cleanup",
+                                    )
+                        continue
+                    ipython_code = _prime_ipython_code(event)
+                    if cleanup_observed and event.get("type") in {
+                        "tool_execution_start",
+                        "tool_execution_end",
+                    }:
+                        if (
+                            ipython_code is not None
+                            and ipython_code.strip() == cleanup_recipe.strip()
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent replayed the RLM child cleanup recipe",
+                            )
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent executed a tool after RLM child cleanup",
+                        )
+                    if ipython_code is not None and ipython_code.strip() == cleanup_recipe.strip():
+                        if not prompt_accepted or not child_message_received:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent began RLM child cleanup before child custody",
+                            )
+                        if cleanup_tool_call_id is not None:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent replayed the RLM child cleanup recipe",
+                            )
+                        candidate_tool_call_id = event.get("toolCallId")
+                        if (
+                            not isinstance(candidate_tool_call_id, str)
+                            or not candidate_tool_call_id
+                            or "\x00" in candidate_tool_call_id
+                            or len(candidate_tool_call_id.encode("utf-8")) > 256
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent cleanup tool call omitted a valid identity",
+                            )
+                        cleanup_tool_call_id = candidate_tool_call_id
+                        continue
+                    if (
+                        cleanup_tool_call_id is not None
+                        and event.get("type") == "tool_execution_end"
+                        and event.get("toolName") == "ipython"
+                        and event.get("toolCallId") == cleanup_tool_call_id
+                    ):
+                        if cleanup_observed:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent replayed the RLM child cleanup result",
+                            )
+                        if not _prime_tool_result_contains(
+                            event, cleanup_marker, cleanup_tool_call_id
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child cleanup did not complete successfully",
+                            )
+                        cleanup_observed = True
                         continue
                     if event.get("type") != "agent_end":
                         continue
@@ -585,6 +777,11 @@ class PrimeAgentBackend:
                         or not matching_child_indexes
                     ):
                         continue
+                    if cleanup_tool_call_id is None or not cleanup_observed:
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent omitted confirmed RLM child cleanup",
+                        )
                     final_text = next(
                         (
                             text

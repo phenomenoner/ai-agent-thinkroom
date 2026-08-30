@@ -1545,6 +1545,72 @@ def test_prime_backend_bounds_every_configured_argv_value():
 
 
 @pytest.mark.asyncio
+async def test_prime_cleanup_rejects_extra_direct_child_before_delete():
+    from thinkroom import backends as backend_module
+
+    class Child:
+        def __init__(self, name):
+            self.session_name = name
+            self.status = "completed"
+
+    class FakeRlm:
+        def __init__(self):
+            self.children = [Child("thinkroom-frame-worker"), Child("unexpected-worker")]
+            self.deleted = []
+
+        async def list_subagents(self):
+            return list(self.children)
+
+        async def delete_subagent(self, child):
+            self.deleted.append(child)
+            self.children.remove(child)
+
+    recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
+    source = "async def run(rlm):\n" + "\n".join(f"    {line}" for line in recipe.splitlines())
+    namespace = {}
+    exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
+    rlm = FakeRlm()
+
+    with pytest.raises(RuntimeError, match="unexpected direct Prime RLM child"):
+        await namespace["run"](rlm)
+
+    assert rlm.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_prime_cleanup_rejects_extra_direct_child_after_delete():
+    from thinkroom import backends as backend_module
+
+    class Child:
+        def __init__(self, name):
+            self.session_name = name
+            self.status = "completed"
+
+    class FakeRlm:
+        def __init__(self):
+            self.children = [Child("thinkroom-frame-worker")]
+            self.deleted = []
+
+        async def list_subagents(self):
+            return list(self.children)
+
+        async def delete_subagent(self, child):
+            self.deleted.append(child)
+            self.children = [Child("unexpected-worker")]
+
+    recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
+    source = "async def run(rlm):\n" + "\n".join(f"    {line}" for line in recipe.splitlines())
+    namespace = {}
+    exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
+    rlm = FakeRlm()
+
+    with pytest.raises(RuntimeError, match="unexpected direct Prime RLM child after cleanup"):
+        await namespace["run"](rlm)
+
+    assert len(rlm.deleted) == 1
+
+
+@pytest.mark.asyncio
 async def test_prime_backend_rejects_prompt_above_safe_argv_limit_before_spawn():
     backend = PrimeAgentBackend("/definitely/not/executed", "", "", "off")
     request = BackendRequestV1(
@@ -1612,6 +1678,16 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
         "'success': True}), flush=True)\n"
         "for _ in range(20):\n"
         "    print(json.dumps({'type': 'message_update', 'delta': 'x' * 1000}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
@@ -1660,6 +1736,11 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     assert "7000 UTF-8 bytes" in prompt
     assert "thinkroom-frame-worker" in prompt
     assert "agent_message" in prompt
+    assert "rlm.list_subagents" in prompt
+    assert "rlm.delete_subagent" in prompt
+    assert "for _poll in range(30)" in prompt
+    assert "await _asyncio.sleep(1)" in prompt
+    assert "THINKROOM_CHILD_CLEANED:thinkroom-frame-worker" in prompt
     limited = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=32)
     with pytest.raises(BackendError) as caught:
         await limited.invoke(request)
@@ -1680,6 +1761,156 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     with pytest.raises(BackendError) as invalid_caught:
         await invalid_backend.invoke(request)
     assert invalid_caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_rejects_cleanup_marker_from_different_tool_call(tmp_path):
+    executable = tmp_path / "prime-without-child-cleanup"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-start', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-end', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000).invoke(
+            request
+        )
+
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert "cleanup" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        ("before-custody", "before child custody"),
+        ("early-fenced", "before RLM child cleanup"),
+        ("post-cleanup-tool", "after RLM child cleanup"),
+        ("post-cleanup-child", "after RLM child cleanup"),
+        ("replayed-start", "replayed the RLM child cleanup recipe"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_prime_backend_rejects_cleanup_order_and_replay(
+    tmp_path, monkeypatch, scenario, message
+):
+    executable = tmp_path / "prime-invalid-cleanup-order"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "response = {'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}\n"
+        "child = {'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}\n"
+        "late_child = {'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'late child', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'unexpected-worker'}}}}\n"
+        "start = {'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}\n"
+        "end = {'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}\n"
+        "fenced = '```json\\n{\"x\":1}\\n```'\n"
+        "early = {'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': fenced}], 'stopReason': 'stop'}}\n"
+        "terminal = {'type': 'agent_end', 'messages': [child['message'], early['message']]}\n"
+        "other_start = {'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'late-tool', 'args': {'code': 'await rlm(\"late\")'}}\n"
+        "print(json.dumps(response), flush=True)\n"
+        "if os.environ['SCENARIO'] == 'before-custody':\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "elif os.environ['SCENARIO'] == 'early-fenced':\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "    print(json.dumps(early), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    print(json.dumps(terminal), flush=True)\n"
+        "elif os.environ['SCENARIO'] == 'post-cleanup-tool':\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    print(json.dumps(other_start), flush=True)\n"
+        "    print(json.dumps(terminal), flush=True)\n"
+        "elif os.environ['SCENARIO'] == 'post-cleanup-child':\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    print(json.dumps(late_child), flush=True)\n"
+        "    print(json.dumps(terminal), flush=True)\n"
+        "else:\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    start['toolCallId'] = 'cleanup-2'\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("SCENARIO", scenario)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000).invoke(
+            request
+        )
+
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert message in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -1743,6 +1974,16 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
         "'success': True}), flush=True)\n"
         "for _ in range(int(os.environ['UPDATES'])):\n"
         "    print(json.dumps({'type': 'message_update', 'delta': 'x'}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
@@ -1756,7 +1997,7 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
     executable.chmod(0o755)
     monkeypatch.setenv("PID_FILE", str(pid_file))
     monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1_000_000)
-    monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 3)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 6)
     request = BackendRequestV1(
         phase="frame",
         job_id="j",
@@ -1806,6 +2047,16 @@ async def test_prime_backend_discards_stderr_without_overriding_valid_result(tmp
         "sys.stderr.flush()\n"
         "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
         "'success': True}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
         "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
         "print(json.dumps({'type': 'agent_end', 'messages': ["
@@ -1885,6 +2136,18 @@ async def test_prime_backend_uses_strict_lf_jsonl_and_only_accepts_answer_after_
         "command = json.loads(sys.stdin.readline())\n"
         "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
         "'success': True}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [], 'stopReason': 'toolUse'}}), flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
         "early = json.dumps({'schema_version':1,'decision':'early','scope':'s',"
         "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
         "'research_questions':['q']}, ensure_ascii=False)\n"
