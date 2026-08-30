@@ -2448,6 +2448,18 @@ async def test_official_mcp_client_interoperability():
         "thinkroom_list_research",
         "thinkroom_cancel_research",
     }
+    research = next(tool for tool in tools.tools if tool.name == "thinkroom_research")
+    properties = research.inputSchema["properties"]
+    assert properties["question"]["minLength"] == 10
+    assert properties["question"]["maxLength"] == 10000
+    assert properties["context"]["anyOf"][0]["maxLength"] == 100000
+    assert properties["domain"]["enum"] == ["generic", "coding", "trading"]
+    assert properties["branch_count"]["minimum"] == 2
+    assert properties["branch_count"]["maximum"] == 6
+    idempotency_schema = properties["idempotency_key"]["anyOf"][0]
+    assert idempotency_schema["minLength"] == 1
+    assert idempotency_schema["maxLength"] == 128
+    assert idempotency_schema["pattern"] == "^[!-~]+$"
 
 
 @pytest.mark.asyncio
@@ -4328,24 +4340,36 @@ _PREPROFILE_FILES = {
     "thinkroom-operate/SKILL.md": "6d905d1e84bfd0244d5f264d66f3e58ca7b8d0f997bd51676f76b971c08601d8",
     "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
 }
+_PREPROFILE_CRLF_MANIFEST_SHA256 = (
+    "8ed21c60f8db3101ea213b0872a2eed6003766508d7f49a19f050371eb565e9f"
+)
+_PREPROFILE_CRLF_FILES = {
+    "thinkroom-install/SKILL.md": "612bfb511f0517599bf93d32fcdab5415d3db7104dc86f57b3b732a7fa54c260",
+    "thinkroom-operate/SKILL.md": "c2baccebe91e3029dc8aef45d8539b0849be86e05b3777919b214fceeb60cd41",
+    "thinkroom-trigger/SKILL.md": "2630f95045e2aab2831d7c7982b4072544016714db4b10727e21f380593b5728",
+}
 
 
-def _seed_preprofile_skills(target: Path) -> None:
-    from thinkroom import skills as skill_module
-
+def _seed_preprofile_skills(target: Path, *, crlf: bool = False) -> None:
     fixture = Path(__file__).parent / "fixtures/thinkroom-install-v020-preprofiles.txt"
     payloads = {
         "thinkroom-install/SKILL.md": fixture.read_bytes(),
         "thinkroom-operate/SKILL.md": (
-            skill_module.BUNDLE / "thinkroom-operate/SKILL.md"
+            Path(__file__).parent / "fixtures/thinkroom-operate-v020-preprofiles.txt"
         ).read_bytes(),
         "thinkroom-trigger/SKILL.md": (
             Path(__file__).parent / "fixtures/thinkroom-trigger-v020-preprofiles.txt"
         ).read_bytes(),
     }
+    if crlf:
+        payloads = {
+            relative: data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            for relative, data in payloads.items()
+        }
+    expected_files = _PREPROFILE_CRLF_FILES if crlf else _PREPROFILE_FILES
     assert {
         relative: hashlib.sha256(data).hexdigest() for relative, data in payloads.items()
-    } == _PREPROFILE_FILES
+    } == expected_files
     for relative, data in payloads.items():
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -4357,9 +4381,11 @@ def _seed_preprofile_skills(target: Path) -> None:
             {
                 "receipt_version": "1",
                 "bundle_version": "0.2.0",
-                "manifest_sha256": _PREPROFILE_MANIFEST_SHA256,
+                "manifest_sha256": (
+                    _PREPROFILE_CRLF_MANIFEST_SHA256 if crlf else _PREPROFILE_MANIFEST_SHA256
+                ),
                 "files": [
-                    {"path": path, "sha256": digest} for path, digest in _PREPROFILE_FILES.items()
+                    {"path": path, "sha256": digest} for path, digest in expected_files.items()
                 ],
             },
             indent=2,
@@ -4376,11 +4402,24 @@ def test_skills_known_preprofile_receipt_migrates_to_six_file_bundle(tmp_path):
     classifications = {item["path"]: item["classification"] for item in planned}
     assert classifications["thinkroom-install/SKILL.md"] == "UPDATE"
     assert classifications["thinkroom-install/agents/openai.yaml"] == "ADD"
-    assert classifications["thinkroom-operate/SKILL.md"] == "EXACT"
+    assert classifications["thinkroom-operate/SKILL.md"] == "UPDATE"
     assert install(target) == planned
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
     receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
     assert len(receipt["files"]) == 6
+
+
+def test_skills_known_crlf_preprofile_receipt_migrates_to_lf_bundle(tmp_path):
+    target = tmp_path / "skills"
+    _seed_preprofile_skills(target, crlf=True)
+
+    planned = plan(target)
+    classifications = {item["path"]: item["classification"] for item in planned}
+    assert classifications["thinkroom-install/SKILL.md"] == "UPDATE"
+    assert classifications["thinkroom-operate/SKILL.md"] == "UPDATE"
+    assert classifications["thinkroom-trigger/SKILL.md"] == "UPDATE"
+    assert install(target) == planned
+    assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
 
 
 def test_skills_known_preprofile_receipt_can_be_uninstalled(tmp_path):

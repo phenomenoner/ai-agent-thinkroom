@@ -12,6 +12,10 @@ All notable changes to Thinkroom are documented here.
 
 ### Changed
 
+- The MCP research tool now exposes question/context bounds, the exact domain enum, and branch-count
+  bounds in its callable schema; the operation skill maps descriptive research categories to the
+  `generic` default and preflights idempotency keys before submission. Managed skill migration also
+  recognizes the exact CRLF form of the historical text-only v0.2 Windows checkout.
 - The managed Skills installer recognizes the exact pre-profile v0.2 receipt, adds Codex metadata,
   updates changed owned payloads, and publishes the current receipt while preserving fail-closed
   behavior for unknown, malformed, or modified installations and preserving concurrent replacements
