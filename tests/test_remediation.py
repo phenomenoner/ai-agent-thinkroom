@@ -1970,6 +1970,7 @@ async def test_prime_backend_rejects_cleanup_marker_from_different_tool_call(tmp
     ("scenario", "message"),
     [
         ("before-custody", "before child custody"),
+        ("terminal-before-custody", "before child custody"),
         ("early-fenced", "before RLM child cleanup"),
         ("post-cleanup-tool", "after RLM child cleanup"),
         ("post-cleanup-child", "after RLM child cleanup"),
@@ -2009,6 +2010,13 @@ async def test_prime_backend_rejects_cleanup_order_and_replay(
         "if os.environ['SCENARIO'] == 'before-custody':\n"
         "    print(json.dumps(start), flush=True)\n"
         "    print(json.dumps(child), flush=True)\n"
+        "elif os.environ['SCENARIO'] == 'terminal-before-custody':\n"
+        "    print(json.dumps(early), flush=True)\n"
+        "    print(json.dumps(child), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    print(json.dumps(early), flush=True)\n"
+        "    print(json.dumps(terminal), flush=True)\n"
         "elif os.environ['SCENARIO'] == 'early-fenced':\n"
         "    print(json.dumps(child), flush=True)\n"
         "    print(json.dumps(early), flush=True)\n"

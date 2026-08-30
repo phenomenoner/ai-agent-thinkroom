@@ -688,7 +688,17 @@ class PrimeAgentBackend:
                             )
                         child_message_received = child_message_received or matched_child
                         text = assistant_text(message)
-                        if child_message_received and not cleanup_observed and not matched_child:
+                        if not child_message_received and text is not None:
+                            try:
+                                parse_json_object(text)
+                            except BackendError:
+                                pass
+                            else:
+                                raise BackendError(
+                                    "MALFORMED_PROVIDER_OUTPUT",
+                                    "Prime Agent emitted final JSON before child custody",
+                                )
+                        elif child_message_received and not cleanup_observed and not matched_child:
                             if text is not None:
                                 try:
                                     parse_json_object(text)
