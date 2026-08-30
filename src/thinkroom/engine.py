@@ -521,13 +521,18 @@ class ResearchEngine:
                 repair_budget=fork_repair_budget,
             )
         except (ValidationError, BackendError) as exc:
-            if isinstance(exc, BackendError) and exc.code != "MALFORMED_PROVIDER_OUTPUT":
-                raise
+            if isinstance(exc, BackendError):
+                oversized_schema_repair = (
+                    exc.code == "OUTPUT_LIMIT_EXCEEDED" and fork_repair_budget[0] == 0
+                )
+                if exc.code != "MALFORMED_PROVIDER_OUTPUT" and not oversized_schema_repair:
+                    raise
             # _phase already performed the one allowed provider regeneration.
             # Schema-invalid or unparsable fork output must not destroy the
-            # whole job: move to a deterministic, schema-validated and uniquely
-            # identified fallback. Transport, deadline and resource failures
-            # remain fatal and are never handled here.
+            # whole job. If that invalid output consumed the repair budget, an
+            # oversized repair is also contained by the deterministic fallback.
+            # Initial output limits and all other transport, deadline, and
+            # resource failures remain fatal.
             fallback = ForkOutputV1(perspectives=pack.fallbacks(request.branch_count))
             perspectives = fallback.perspectives
             warning = "provider fork invalid; deterministic fallback used"

@@ -385,7 +385,10 @@ class PrimeAgentBackend:
 
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
         payload = provider_payload(request)
-        target_output_bytes = min(self.max_response_bytes, self.max_output_tokens, 7000)
+        # Prime Agent exposes no supported output-token CLI flag. Use the token
+        # budget only as four-byte-per-token prompt guidance and enforce the
+        # configured response-byte ceiling independently below.
+        target_output_bytes = min(self.max_response_bytes, self.max_output_tokens * 4)
         payload["instruction"] += (
             f" Keep the complete JSON under {target_output_bytes} UTF-8 bytes; "
             "be concise, emit no prose, and include only schema fields."
@@ -448,7 +451,7 @@ class PrimeAgentBackend:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=max(self.max_response_bytes, 65536),
+                limit=_PRIME_RPC_RAW_BYTE_LIMIT,
             )
             assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
             rpc_proc = proc
@@ -468,7 +471,7 @@ class PrimeAgentBackend:
 
             async def run_rpc() -> dict[str, Any]:
                 raw_transport_bytes = 0
-                retained_event_bytes = 0
+                control_event_bytes = 0
                 event_count = 0
                 prompt_accepted = False
                 child_message_received = False
@@ -546,12 +549,12 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC event was not an object",
                         )
-                    if event.get("type") in {"response", "message_end", "agent_end"}:
-                        retained_event_bytes += len(line)
-                        if retained_event_bytes > self.max_response_bytes:
+                    if event.get("type") == "response":
+                        control_event_bytes += len(line)
+                        if control_event_bytes > self.max_response_bytes:
                             raise BackendError(
                                 "OUTPUT_LIMIT_EXCEEDED",
-                                "Prime Agent RPC retained events exceeded byte limit",
+                                "Prime Agent RPC control events exceeded byte limit",
                             )
                     if event.get("type") == "response" and event.get("id") == "thinkroom-provider":
                         if event.get("command") != "prompt" or event.get("success") is not True:
@@ -598,9 +601,7 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC omitted the terminal assistant message",
                         )
-                    if len(final_text.encode("utf-8")) > min(
-                        self.max_response_bytes, self.max_output_tokens
-                    ):
+                    if len(final_text.encode("utf-8")) > self.max_response_bytes:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent final message exceeded byte limit",
