@@ -257,7 +257,7 @@ For the release-authorized production path, download the wheel, `requirements-pr
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.0-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.1-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 

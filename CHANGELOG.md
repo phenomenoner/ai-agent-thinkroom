@@ -2,7 +2,7 @@
 
 All notable changes to Thinkroom are documented here.
 
-## Unreleased
+## 0.2.1 — 2026-08-30
 
 ### Added
 

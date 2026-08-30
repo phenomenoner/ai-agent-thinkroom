@@ -47,8 +47,8 @@ def test_release_builder_pins_frontend_backend_and_epoch(tmp_path, monkeypatch):
         calls.append((command, cwd, env))
         output.mkdir(parents=True, exist_ok=True)
         (output / ".gitignore").write_text("*\n")
-        (output / "thinkroom-0.2.0-py3-none-any.whl").write_bytes(b"wheel")
-        (output / "thinkroom-0.2.0.tar.gz").write_bytes(b"sdist")
+        (output / "thinkroom-0.2.1-py3-none-any.whl").write_bytes(b"wheel")
+        (output / "thinkroom-0.2.1.tar.gz").write_bytes(b"sdist")
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -85,8 +85,8 @@ def test_release_builder_pins_frontend_backend_and_epoch(tmp_path, monkeypatch):
     assert "hatchling==1.32.0" in constraints
     assert constraints.count("--hash=sha256:") == 12
     assert sorted(path.name for path in output.iterdir()) == [
-        "thinkroom-0.2.0-py3-none-any.whl",
-        "thinkroom-0.2.0.tar.gz",
+        "thinkroom-0.2.1-py3-none-any.whl",
+        "thinkroom-0.2.1.tar.gz",
     ]
 
 
@@ -149,8 +149,8 @@ def test_release_builder_rejects_unexpected_generated_output(tmp_path, monkeypat
 
     def fake_run(command, *, cwd, env, check):
         output.mkdir(parents=True, exist_ok=True)
-        (output / "thinkroom-0.2.0-py3-none-any.whl").write_bytes(b"wheel")
-        (output / "thinkroom-0.2.0.tar.gz").write_bytes(b"sdist")
+        (output / "thinkroom-0.2.1-py3-none-any.whl").write_bytes(b"wheel")
+        (output / "thinkroom-0.2.1.tar.gz").write_bytes(b"sdist")
         (output / "unexpected.txt").write_text("unexpected")
         return subprocess.CompletedProcess(command, 0)
 
@@ -186,8 +186,8 @@ Path(os.environ["THINKROOM_TEST_RECEIPT"]).write_text(json.dumps({
 output = Path(sys.argv[sys.argv.index("--out-dir") + 1])
 output.mkdir(parents=True, exist_ok=True)
 (output / ".gitignore").write_text("*\\n")
-(output / "thinkroom-0.2.0-py3-none-any.whl").write_bytes(b"wheel")
-(output / "thinkroom-0.2.0.tar.gz").write_bytes(b"sdist")
+(output / "thinkroom-0.2.1-py3-none-any.whl").write_bytes(b"wheel")
+(output / "thinkroom-0.2.1.tar.gz").write_bytes(b"sdist")
 """
     )
     fake_uv.chmod(0o755)
@@ -436,8 +436,8 @@ def test_release_builder_rejects_malformed_archives(tmp_path):
     module = _load_builder()
     output = tmp_path / "dist"
     output.mkdir()
-    (output / "thinkroom-0.2.0-py3-none-any.whl").write_bytes(b"not a wheel")
-    (output / "thinkroom-0.2.0.tar.gz").write_bytes(b"not an sdist")
+    (output / "thinkroom-0.2.1-py3-none-any.whl").write_bytes(b"not a wheel")
+    (output / "thinkroom-0.2.1.tar.gz").write_bytes(b"not an sdist")
     with pytest.raises(RuntimeError, match="invalid release artifact"):
         module._close_release_output(output)
 
@@ -469,8 +469,8 @@ def test_release_builder_executes_private_copy_after_selected_path_replacement(
         assert Path(command[0]) != selected
         assert module._sha256_file(Path(command[0])) == module.REQUIRED_UV_SHA256
         output.mkdir(exist_ok=True)
-        (output / "thinkroom-0.2.0-py3-none-any.whl").write_bytes(b"wheel")
-        (output / "thinkroom-0.2.0.tar.gz").write_bytes(b"sdist")
+        (output / "thinkroom-0.2.1-py3-none-any.whl").write_bytes(b"wheel")
+        (output / "thinkroom-0.2.1.tar.gz").write_bytes(b"sdist")
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(module.subprocess, "check_output", fake_version)
