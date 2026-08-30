@@ -204,7 +204,7 @@ The installer validates the manifest syntax, the exact payload file set, and all
 - `CritiqueOutputV1`: agreements, contradictions, unsupported claims, blind spots, discriminating evidence, branch assessments.
 - `SynthesisOutputV1`: disposition, recommendation, rationale, ranked alternatives, evidence ledger, disagreements, uncertainties, falsifiers, next actions, source attempt and branch IDs.
 
-Fork normalization compares case-folded titles, hypotheses, and approaches. Duplicate perspectives are regenerated once; if diversity is still insufficient, deterministic domain-pack fallbacks fill the requested count and a provenance warning is recorded.
+Fork normalization compares case-folded titles, hypotheses, and approaches. Duplicate perspectives are regenerated once; if diversity is still insufficient, deterministic domain-pack fallbacks fill the requested count and a provenance warning is recorded. A schema-invalid or unparsable fork is regenerated once, then uses the same deterministic fallback. If that one repair response exceeds the configured output limit, the deterministic fallback contains the already-invalid fork path without crossing providers; an output-limit failure on the initial fork remains fatal.
 
 All schemas forbid unknown fields at provider boundaries and carry `schema_version = 1`. Non-empty text fields are 1–4,000 characters; summaries/recommendations are at most 12,000; evidence references are at most 2,048; ordinary collections contain 1–50 items and next-action lists contain 1–20. `EvidenceV1` contains a required ID matching `^[a-z][a-z0-9_-]{0,63}$`, statement, relationship (`supports` or `contradicts`), optional source label/reference, verification status, and verification basis. Evidence IDs are unique within one branch. `ClaimV1` contains statement and related evidence IDs, each of which must resolve within that branch. `BackendRequestV1.input` is a discriminated union for the named phase. Unknown enum values, fields, empty required collections, duplicate evidence IDs, over-limit text, cross-attempt IDs, or references to absent evidence fail validation. The OpenAPI document is the normative external schema; these phase schemas are normative internal backend contracts.
 
@@ -279,6 +279,8 @@ Environment variables use prefix `THINKROOM_`. Explicit embedded/CLI configurati
 | `RETENTION_DAYS` | 30 | 1–3,650 |
 | `HOST` / `PORT` | `127.0.0.1` / `8787` | loopback only / 1–65,535 |
 | `LOG_LEVEL` | `INFO` | standard levels |
+
+OpenAI-compatible backends enforce `MAX_BACKEND_OUTPUT_TOKENS` in the provider request. Prime Agent has no supported output-token CLI flag, so its adapter converts that setting to four-byte-per-token prompt guidance while `MAX_BACKEND_RESPONSE_BYTES` remains the independent hard ceiling for retained control events and terminal JSON. Historical messages repeated inside an `agent_end` envelope are parsed under the separate raw-transport ceiling but are never retained or charged as terminal output.
 
 Provider settings are `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `PRIME_AGENT_EXECUTABLE`, `PRIME_AGENT_PROVIDER`, `PRIME_AGENT_MODEL`, `PRIME_AGENT_THINKING`, `PRIME_AGENT_FALLBACK_PROVIDER`, `PRIME_AGENT_FALLBACK_MODEL`, and `PRIME_AGENT_FALLBACK_THINKING`. Required settings for the selected backend are validated at startup. Secret values never appear in validation errors.
 

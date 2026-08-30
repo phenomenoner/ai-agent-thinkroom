@@ -218,6 +218,38 @@ class MalformedForkBackend(ScriptedBackend):
         return await super().invoke(request)
 
 
+class SchemaInvalidThenOutputLimitForkBackend(ScriptedBackend):
+    def __init__(self) -> None:
+        super().__init__(calls=[])
+        self.fork_calls = 0
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, object]:
+        if request.phase != "fork":
+            return await super().invoke(request)
+        self.fork_calls += 1
+        if self.fork_calls == 2:
+            raise BackendError(
+                "OUTPUT_LIMIT_EXCEEDED", "fork repair response exceeded configured limit"
+            )
+        result = await super().invoke(request)
+        del result["perspectives"][0]["differentiator"]
+        return result
+
+
+class InitialOutputLimitForkBackend(ScriptedBackend):
+    def __init__(self) -> None:
+        super().__init__(calls=[])
+        self.fork_calls = 0
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, object]:
+        if request.phase == "fork":
+            self.fork_calls += 1
+            raise BackendError(
+                "OUTPUT_LIMIT_EXCEEDED", "initial fork response exceeded configured limit"
+            )
+        return await super().invoke(request)
+
+
 class DiversityRetryProviderFailureBackend(ScriptedBackend):
     def __init__(self) -> None:
         super().__init__(calls=[])
@@ -582,6 +614,63 @@ async def test_repeated_malformed_fork_output_uses_deterministic_fallback(tmp_pa
         assert len({p["id"] for p in perspectives}) == len(perspectives) == 2
         assert len(set(branches)) == len(branches) == 2
         assert backend.fork_calls == 2
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_invalid_fork_then_oversized_repair_uses_deterministic_fallback(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "db.sqlite"))
+    repo.open()
+    backend = SchemaInvalidThenOutputLimitForkBackend()
+    settings = Settings.from_env(database_url=f"sqlite+aiosqlite:///{tmp_path / 'db.sqlite'}")
+    engine = ResearchEngine(repo, backend, settings)
+    try:
+        job, _ = await engine.submit(
+            ResearchRequest(question="Should we choose this important option?", branch_count=2)
+        )
+        for _ in range(200):
+            row = repo.get_job(job)
+            if row and row["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+        row = repo.get_job(job)
+        assert row and row["state"] == "succeeded"
+        artifacts = repo.get_artifacts(job, row["attempt_id"])
+        fork = json.loads(next(a["payload"] for a in artifacts if a["kind"] == "fork"))
+        assert fork["provenance_warning"] == "provider fork invalid; deterministic fallback used"
+        assert len({p["id"] for p in fork["perspectives"]}) == 2
+        assert backend.fork_calls == 2
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_initial_fork_output_limit_remains_fatal(tmp_path):
+    repo = SQLiteRepository(str(tmp_path / "db.sqlite"))
+    repo.open()
+    backend = InitialOutputLimitForkBackend()
+    engine = ResearchEngine(
+        repo,
+        backend,
+        Settings.from_env(database_url=f"sqlite+aiosqlite:///{tmp_path / 'db.sqlite'}"),
+    )
+    try:
+        job, _ = await engine.submit(
+            ResearchRequest(question="Should we choose this important option?", branch_count=2)
+        )
+        for _ in range(200):
+            row = repo.get_job(job)
+            if row and row["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+        row = repo.get_job(job)
+        assert row and row["state"] == "failed"
+        assert json.loads(row["terminal_error"])["code"] == "OUTPUT_LIMIT_EXCEEDED"
+        assert not any(a["kind"] == "fork" for a in repo.get_artifacts(job, row["attempt_id"]))
+        assert backend.fork_calls == 1
     finally:
         await engine.stop()
         repo.close()
@@ -1657,19 +1746,19 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     assert "--model" not in args
     prompt = captured["command"]["message"]
     assert '"title": "FrameOutputV1"' in prompt
-    assert "7000 UTF-8 bytes" in prompt
+    assert "10000 UTF-8 bytes" in prompt
     assert "thinkroom-frame-worker" in prompt
     assert "agent_message" in prompt
     limited = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=32)
     with pytest.raises(BackendError) as caught:
         await limited.invoke(request)
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
-    token_limited = PrimeAgentBackend(
+    token_guided = PrimeAgentBackend(
         str(executable), "", "", "off", max_output_tokens=32, max_response_bytes=4096
     )
-    with pytest.raises(BackendError) as token_caught:
-        await token_limited.invoke(request)
-    assert token_caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert (await token_guided.invoke(request))["decision"] == "d"
+    token_guided_prompt = json.loads(capture.read_text())["command"]["message"]
+    assert "128 UTF-8 bytes" in token_guided_prompt
 
     invalid_utf8 = tmp_path / "prime-invalid-utf8"
     invalid_utf8.write_text(
@@ -1680,6 +1769,50 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     with pytest.raises(BackendError) as invalid_caught:
         await invalid_backend.invoke(request)
     assert invalid_caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_projects_terminal_result_before_response_byte_limit(tmp_path):
+    executable = tmp_path / "prime-large-history"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'assistant', 'content': 'x' * 70000, 'stopReason': 'stop'},"
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    result = await PrimeAgentBackend(
+        str(executable), "", "", "off", max_response_bytes=4096
+    ).invoke(request)
+
+    assert result["decision"] == "d"
 
 
 @pytest.mark.asyncio
