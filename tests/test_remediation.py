@@ -2067,6 +2067,7 @@ async def test_prime_backend_rejects_cleanup_order_and_replay(
     [
         ("aggregate-pre-cleanup-terminal", "after RLM child cleanup"),
         ("aggregate-post-cleanup-child", "after RLM child cleanup"),
+        ("aggregate-multiple-terminals", "multiple terminal messages after RLM child cleanup"),
     ],
 )
 @pytest.mark.asyncio
@@ -2095,6 +2096,11 @@ async def test_prime_backend_reconciles_aggregate_terminal_and_child_order(
         "'research_questions':['q']})\n"
         "terminal_message = {'role': 'assistant', 'content': "
         "[{'type': 'text', 'text': result}], 'stopReason': 'stop'}\n"
+        "earlier_result = json.dumps({'schema_version':1,'decision':'earlier','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']})\n"
+        "earlier_terminal = {'role': 'assistant', 'content': "
+        "[{'type': 'text', 'text': earlier_result}], 'stopReason': 'stop'}\n"
         "unexpected_child = {'role': 'custom', 'customType': 'agent_message', "
         "'details': {'message': 'late child', 'fromRelationship': 'child', "
         "'from': {'sessionName': 'unexpected-worker'}}}\n"
@@ -2106,6 +2112,9 @@ async def test_prime_backend_reconciles_aggregate_terminal_and_child_order(
         "if os.environ['SCENARIO'] == 'aggregate-post-cleanup-child':\n"
         "    print(json.dumps({'type': 'message_end', 'message': terminal_message}), flush=True)\n"
         "    messages.append(unexpected_child)\n"
+        "elif os.environ['SCENARIO'] == 'aggregate-multiple-terminals':\n"
+        "    print(json.dumps({'type': 'message_end', 'message': terminal_message}), flush=True)\n"
+        "    messages.insert(1, earlier_terminal)\n"
         "print(json.dumps({'type': 'agent_end', 'messages': messages}), flush=True)\n"
         "sys.stdin.read()\n"
     )

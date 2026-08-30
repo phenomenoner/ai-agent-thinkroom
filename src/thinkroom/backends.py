@@ -802,19 +802,22 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent omitted confirmed RLM child cleanup",
                         )
-                    final_text = next(
-                        (
-                            text
-                            for message in reversed(messages[matching_child_indexes[-1] + 1 :])
-                            if (text := assistant_text(message)) is not None
-                        ),
-                        None,
-                    )
-                    if final_text is None:
+                    terminal_texts = [
+                        text
+                        for message in messages[matching_child_indexes[-1] + 1 :]
+                        if (text := assistant_text(message)) is not None
+                    ]
+                    if not terminal_texts:
                         raise BackendError(
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC omitted the terminal assistant message",
                         )
+                    if len(terminal_texts) != 1:
+                        raise BackendError(
+                            "MALFORMED_PROVIDER_OUTPUT",
+                            "Prime Agent emitted multiple terminal messages after RLM child cleanup",
+                        )
+                    final_text = terminal_texts[0]
                     if (
                         post_cleanup_terminal_text is None
                         or final_text != post_cleanup_terminal_text

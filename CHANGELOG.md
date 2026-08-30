@@ -22,8 +22,8 @@ All notable changes to Thinkroom are documented here.
 - Prime/RLM phases now delete the completed named child from the parent registry after child-message
   custody and before accepting terminal phase JSON; a matching executed cleanup recipe and marker are
   required. Terminal acceptance also reconciles a post-cleanup standalone assistant event with the
-  aggregate transcript and rejects aggregate-only or unexpected child custody. This is a bounded
-  lifecycle workaround, not a producer-side RPC transport fix.
+  aggregate transcript and rejects aggregate-only or repeated terminal output plus unexpected child
+  custody. This is a bounded lifecycle workaround, not a producer-side RPC transport fix.
 - The managed Skills installer recognizes the exact pre-profile v0.2 receipt, adds Codex metadata,
   updates changed owned payloads, and publishes the current receipt while preserving fail-closed
   behavior for unknown, malformed, or modified installations and preserving concurrent replacements
