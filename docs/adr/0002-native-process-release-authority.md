@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-28
-- Decision owner: CK
+- Decision owner: project maintainer
 - Amends: deployment and verification portions of `docs/specification.md`
 
 ## Context

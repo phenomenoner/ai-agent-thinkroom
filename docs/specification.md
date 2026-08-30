@@ -2,7 +2,7 @@
 
 Status: **FROZEN FOR IMPLEMENTATION**
 
-Deployment amendment (2026-08-28, CK approved): the native Python package and POSIX/WSL process are the v0.2 production authority. Docker is retained only as operator-owned reference material and is outside the native release claim.
+Deployment amendment (2026-08-28): the native Python package and POSIX/WSL process are the v0.2 production authority. Docker is retained only as operator-owned reference material and is outside the native release claim.
 
 Authority: `thinkroom_ai_think_tank_product_concept.md`
 

@@ -1,6 +1,6 @@
 # ADR 0005: Prime RLM child cleanup as a bounded interim workaround
 
-Status: accepted for the unreleased v0.2 source line
+Status: accepted for v0.2.1
 
 ## Context
 
@@ -8,7 +8,7 @@ A real Prime-backed Thinkroom end-to-end run reached SYNTHESIS repair and exceed
 
 Prime's parent-scoped RLM registry does expose `list_subagents()` and `delete_subagent()`. Deletion cancels or closes the selected child, writes a durable Prime-owned tombstone, and removes that child from messaging and observation. It does not erase transcript or artifact bytes on disk and cannot undo RPC bytes already transported.
 
-CK explicitly accepts the bounded interim risk of adding lifecycle garbage collection while the upstream transport capability remains unavailable.
+The project explicitly accepts the bounded interim risk of adding lifecycle garbage collection while the upstream transport capability remains unavailable.
 
 ## Decision
 
@@ -67,7 +67,7 @@ Rollback is package-level: restore the prior immutable Thinkroom installation ta
 
 ## Rejected alternatives
 
-- Wait indefinitely for upstream producer filtering: rejected as the only operational response because CK accepts an interim bounded workaround.
+- Wait indefinitely for upstream producer filtering: rejected as the only operational response because the project accepts an interim bounded workaround.
 - Raise or remove the raw transport cap: rejected because it weakens containment without controlling source production.
 - Add Headroom or a downstream compression sidecar: rejected because bytes have already crossed the Prime stdout boundary.
 - Port the full v0.1.1 child-authored payload/provenance protocol: rejected because cleanup alone is the requested seam and the larger protocol remained live-blocked.
