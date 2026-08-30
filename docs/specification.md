@@ -146,16 +146,23 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   invocation-local JSONL RPC session with only the built-in IPython tool, no context files, no
   extensions, no prompt templates, and a temporary working/session directory. Thinkroom SHALL
   instruct the parent to call preloaded `rlm(...)` exactly once with one predictably named child and
-  SHALL return phase JSON only after the same RPC transcript contains a matching child
-  `agent_message` and a later terminal
-  assistant message. Coding context is bounded request data; the adapter SHALL NOT make a target
+  SHALL return phase JSON only after the same RPC stream first exposes a matching child
+  `agent_message`, then an exact IPython cleanup recipe boundedly polls for that named child's
+  completed status, rejects any unexpected direct child, removes it from the parent registry,
+  confirms the invocation-local direct-child registry is empty, and emits the expected cleanup marker
+  from that same correlated tool call, and finally a later terminal assistant message appears. Cleanup
+  before child custody, an unexpected sibling child, duplicate/replayed cleanup calls or results,
+  any post-cleanup tool execution or child custody, and a marker without the matching executed recipe
+  and `toolCallId` are not cleanup evidence. Coding context is bounded
+  request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.
 - Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,
   terminal assistant text, timeout, and cleanup SHALL be bounded. Stderr SHALL be drained without
   retention and SHALL NOT participate in result validity; its task SHALL be cancelled after a valid
   JSONL result. The production process wrapper SHALL retain same-group descendant custody until
   physical exit. Invalid JSONL, wrong child
-  identity, early parent output, failed turns, prompt rejection, timeout, cancellation, or premature
+  identity, missing or forged child-cleanup evidence, early parent output, failed turns, prompt
+  rejection, timeout, cancellation, or premature
   exit SHALL fail as typed backend errors and settle the owned process before capacity is released.
 - Prime Agent owns its provider credentials. Thinkroom SHALL NOT copy OAuth tokens or ambient provider
   credentials into its configuration or persistence. IPython/RLM is trusted provider execution, not a

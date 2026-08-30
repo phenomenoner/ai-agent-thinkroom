@@ -31,7 +31,7 @@ MCP registration remains host-specific:
 
 For Codex App on Windows, the supported production topology selects the WSL2 agent environment and runs the runtime, service, Prime Agent, and database inside WSL on a POSIX filesystem. Native Windows execution is not added to the release claim.
 
-The v0.2 remote RLM flow exercised with Prime Agent 0.8.1 is the product baseline. The abandoned v0.1.1 experimental branch is an evidence reservoir, not a second implementation. Only discriminating hardening is ported: bounded raw RPC transport is added outside the existing retained semantic/result budget. Prompt-driven child deletion and child-authored exact payload protocols are not merged because they did not establish a deterministic Prime Agent 0.8.0 live gate.
+The v0.2 remote RLM flow exercised with Prime Agent 0.8.1 is the product baseline. The abandoned v0.1.1 experimental branch is an evidence reservoir, not a second implementation. Only discriminating hardening is ported: bounded raw RPC transport is added outside the existing retained semantic/result budget. Prompt-driven child deletion and child-authored exact payload protocols were not merged by this decision because they did not establish a deterministic Prime Agent 0.8.0 live gate. ADR 0005 later accepts a narrower cleanup-only workaround under an explicit residual-risk boundary; it does not revive the abandoned payload/provenance protocol.
 
 ## Consequences
 

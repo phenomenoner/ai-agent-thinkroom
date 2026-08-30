@@ -16,6 +16,9 @@ All notable changes to Thinkroom are documented here.
   bounds in its callable schema; the operation skill maps descriptive research categories to the
   `generic` default and preflights idempotency keys before submission. Managed skill migration also
   recognizes the exact CRLF form of the historical text-only v0.2 Windows checkout.
+- Prime/RLM phases now delete the completed named child from the parent registry after child-message
+  custody and before accepting terminal phase JSON; a matching executed cleanup recipe and marker are
+  required. This is a bounded lifecycle workaround, not a producer-side RPC transport fix.
 - The managed Skills installer recognizes the exact pre-profile v0.2 receipt, adds Codex metadata,
   updates changed owned payloads, and publishes the current receipt while preserving fail-closed
   behavior for unknown, malformed, or modified installations and preserving concurrent replacements
@@ -25,6 +28,9 @@ All notable changes to Thinkroom are documented here.
 
 ### Security boundary
 
+- Prime child deletion writes a Prime-owned tombstone and removes the child from messaging and
+  observation, but does not erase Prime transcript/artifact bytes already written or RPC bytes already
+  transported.
 - Prime RPC now has an independent 64 MB raw transport cap and 20,000-record ceiling in addition to
   retained semantic/result limits.
 
