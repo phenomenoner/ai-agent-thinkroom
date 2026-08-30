@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import WithJsonSchema
 
 from .sdk import ThinkroomClient, ThinkroomError
 
@@ -55,11 +57,38 @@ def _mcp_call(operation: Callable[[], Any]) -> Any:
 
 
 def thinkroom_research(
-    question: str,
-    context: str | None = None,
-    domain: str = "generic",
-    branch_count: int = 3,
-    idempotency_key: str | None = None,
+    question: Annotated[
+        str,
+        WithJsonSchema({"type": "string", "minLength": 10, "maxLength": 10000}),
+    ],
+    context: Annotated[
+        str | None,
+        WithJsonSchema({"anyOf": [{"type": "string", "maxLength": 100000}, {"type": "null"}]}),
+    ] = None,
+    domain: Annotated[
+        str,
+        WithJsonSchema({"type": "string", "enum": ["generic", "coding", "trading"]}),
+    ] = "generic",
+    branch_count: Annotated[
+        int,
+        WithJsonSchema({"type": "integer", "minimum": 2, "maximum": 6}),
+    ] = 3,
+    idempotency_key: Annotated[
+        str | None,
+        WithJsonSchema(
+            {
+                "anyOf": [
+                    {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[!-~]+$",
+                    },
+                    {"type": "null"},
+                ]
+            }
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     return _mcp_call(
         lambda: ThinkroomClient().research(

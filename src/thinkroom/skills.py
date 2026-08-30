@@ -27,7 +27,24 @@ _KNOWN_PREVIOUS_RECEIPTS = {
                 "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
             ),
         },
-    }
+    },
+    # Git for Windows could materialize the original text-only v0.2 bundle with
+    # CRLF before the bundle declared stable LF attributes. Accept only the
+    # exact historical manifest and payload digests for that checkout shape.
+    "8ed21c60f8db3101ea213b0872a2eed6003766508d7f49a19f050371eb565e9f": {
+        "bundle_version": "0.2.0",
+        "files": {
+            "thinkroom-install/SKILL.md": (
+                "612bfb511f0517599bf93d32fcdab5415d3db7104dc86f57b3b732a7fa54c260"
+            ),
+            "thinkroom-operate/SKILL.md": (
+                "c2baccebe91e3029dc8aef45d8539b0849be86e05b3777919b214fceeb60cd41"
+            ),
+            "thinkroom-trigger/SKILL.md": (
+                "2630f95045e2aab2831d7c7982b4072544016714db4b10727e21f380593b5728"
+            ),
+        },
+    },
 }
 
 

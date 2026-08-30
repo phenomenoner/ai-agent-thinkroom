@@ -1,7 +1,7 @@
 ---
 name: thinkroom-operate
 description: Operate Thinkroom research jobs
-version: 0.2.1
+version: 0.2.0
 author: CK, Martin (Hermes Agent)
 license: MIT
 platforms: [linux]
@@ -15,19 +15,13 @@ Use this skill after `thinkroom-trigger` passes, or whenever a user asks to subm
 ## Before submission
 
 1. Verify the service is ready on its configured loopback endpoint.
-2. Frame one explicit question from 10 through 10,000 characters and shared context no longer
-   than 100,000 characters.
-3. Select one supported domain: `generic`, `coding`, or `trading`. For product design,
-   organizational strategy, policy, due diligence, or general research synthesis, omit the field
-   and use the `generic` default. Use `coding` only when the branches must reason about software or
-   source code, and `trading` only for market/trading decision support. Never send a descriptive
-   label such as `product_design`, `architecture`, or `strategy`.
-4. Use an integer branch count from 2 through 6, choosing the smallest count that covers
+2. Frame one explicit question and bounded shared context.
+3. Select one supported domain: `generic`, `coding`, or `trading`. Omit the field for
+   the `generic` default; do not send a descriptive natural-language domain label.
+4. Use a branch count from 2 through 6, choosing the smallest count that covers
    distinct perspectives.
-5. Use an idempotency key whenever a transport retry or duplicate submission is possible. It must
-   be 1 through 128 printable non-space ASCII characters.
-6. For MCP, send only fields exposed by the callable tool schema. In particular, do not invent a
-   `deadline_seconds` field when the current MCP tool does not expose one.
+5. Keep `deadline_seconds`, when provided, between 30 and 7200.
+6. Use an idempotency key whenever a transport retry or duplicate submission is possible.
 
 ## Submit
 
@@ -43,14 +37,11 @@ MCP: call `thinkroom_research` with `question`, optional `context`, `domain`, `b
 
 Submission returns a job handle. It does not imply the research succeeded.
 
-If MCP returns `INVALID_ARGUMENT` without field-level details, first compare the exact submitted
-payload with the strict fields above and the callable tool schema. The most common correction for a
-natural-language research category is to remove `domain` and accept `generic`. Make at most one
-retry only when that comparison produces a concrete schema correction. Preserve the question,
-context, branch count, and exact idempotency key so the correction cannot silently become a new
-research request. If the submitted payload was already schema-correct, do not retry unchanged;
-report the opaque rejection and inspect the service boundary. Do not poll or cancel until a
-submission returns a job handle.
+If MCP returns `INVALID_ARGUMENT` without field-level details, treat it as a
+request-schema rejection. Recheck the strict fields above and the callable tool schema,
+then make at most one schema-corrected retry. Preserve the same question, context,
+branch count, and idempotency intent so correction does not silently become a different
+research request. Do not poll or cancel until a submission returns a job handle.
 
 ## Poll and inspect
 
