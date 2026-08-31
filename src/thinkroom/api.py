@@ -168,7 +168,7 @@ def create_app(service: ThinkroomService | None = None) -> FastAPI:
         finally:
             await svc.stop()
 
-    app = FastAPI(title="Thinkroom", version="0.2.1", openapi_version="3.1.0", lifespan=lifespan)
+    app = FastAPI(title="Thinkroom", version="0.2.2", openapi_version="3.1.0", lifespan=lifespan)
     app.add_middleware(RequestBodyLimitMiddleware, max_bytes=svc.settings.max_context_bytes)
     app.add_middleware(LoopbackHostMiddleware)
 
@@ -230,7 +230,7 @@ def create_app(service: ThinkroomService | None = None) -> FastAPI:
 
     @app.get("/api/v1/version")
     async def version() -> dict[str, str]:
-        return {"version": "0.2.1", "schema_version": "1"}
+        return {"version": "0.2.2", "schema_version": "1"}
 
     def resource(job_id: str) -> JobResource:
         row = svc.repo.get_job(job_id)

@@ -4,6 +4,8 @@ All notable changes to Thinkroom are documented here.
 
 ## Unreleased
 
+## 0.2.2 — 2026-08-31
+
 ### Fixed
 
 - Prime Agent 0.8.1 RLM custody now uses the runtime's stable child lifecycle snapshots and
