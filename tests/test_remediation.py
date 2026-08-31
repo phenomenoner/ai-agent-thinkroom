@@ -5148,6 +5148,30 @@ _PREPROFILE_CRLF_FILES = {
     "thinkroom-operate/SKILL.md": "c2baccebe91e3029dc8aef45d8539b0849be86e05b3777919b214fceeb60cd41",
     "thinkroom-trigger/SKILL.md": "2630f95045e2aab2831d7c7982b4072544016714db4b10727e21f380593b5728",
 }
+_PROFILED_RECEIPTS = {
+    "0.2.1": {
+        "manifest_sha256": "5f999b5e4bcb26073bfc0a97eafa8422fadbaa122b9dd6583fa0886b32df6568",
+        "files": {
+            "thinkroom-install/SKILL.md": "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c",
+            "thinkroom-install/agents/openai.yaml": "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2",
+            "thinkroom-operate/SKILL.md": "4cc408d77e97e386523541c3c0306b45c322bf631003512b3296526f6e54d5a0",
+            "thinkroom-operate/agents/openai.yaml": "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823",
+            "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
+            "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
+        },
+    },
+    "0.2.2": {
+        "manifest_sha256": "c24944688e4a6e0b95a8d43c8e4e9177d9ec0388dc2dc9bd1cb1c88d6614975a",
+        "files": {
+            "thinkroom-install/SKILL.md": "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c",
+            "thinkroom-install/agents/openai.yaml": "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2",
+            "thinkroom-operate/SKILL.md": "9f282ae764d72efa74f98044978aa6d128adb89fec8cbcc8e21c3861977be6f6",
+            "thinkroom-operate/agents/openai.yaml": "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823",
+            "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
+            "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
+        },
+    },
+}
 
 
 def _seed_preprofile_skills(target: Path, *, crlf: bool = False) -> None:
@@ -5194,6 +5218,42 @@ def _seed_preprofile_skills(target: Path, *, crlf: bool = False) -> None:
     )
 
 
+def _seed_profiled_skills(target: Path, version: str) -> None:
+    historical = _PROFILED_RECEIPTS[version]
+    bundle = Path(__file__).parents[1] / "src/thinkroom/bundled_skills"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    payloads = {
+        entry["path"]: (bundle / entry["path"]).read_bytes() for entry in manifest["entries"]
+    }
+    payloads["thinkroom-operate/SKILL.md"] = payloads["thinkroom-operate/SKILL.md"].replace(
+        b"version: 0.2.3", f"version: {version}".encode()
+    )
+    expected_files = historical["files"]
+    assert {
+        relative: hashlib.sha256(data).hexdigest() for relative, data in payloads.items()
+    } == expected_files
+    for relative, data in payloads.items():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    receipt = target / ".thinkroom/skills-receipt-v1.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "receipt_version": "1",
+                "bundle_version": version,
+                "manifest_sha256": historical["manifest_sha256"],
+                "files": [
+                    {"path": path, "sha256": digest} for path, digest in expected_files.items()
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
 def test_skills_known_preprofile_receipt_migrates_to_six_file_bundle(tmp_path):
     target = tmp_path / "skills"
     _seed_preprofile_skills(target)
@@ -5220,6 +5280,35 @@ def test_skills_known_crlf_preprofile_receipt_migrates_to_lf_bundle(tmp_path):
     assert classifications["thinkroom-trigger/SKILL.md"] == "UPDATE"
     assert install(target) == planned
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
+
+
+@pytest.mark.parametrize("version", ["0.2.1", "0.2.2"])
+def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
+    target = tmp_path / "skills"
+    _seed_profiled_skills(target, version)
+
+    planned = plan(target)
+    classifications = {item["path"]: item["classification"] for item in planned}
+    assert classifications["thinkroom-operate/SKILL.md"] == "UPDATE"
+    assert {
+        state for path, state in classifications.items() if path != "thinkroom-operate/SKILL.md"
+    } == {"EXACT"}
+    assert install(target) == planned
+    assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
+    receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
+    assert receipt["bundle_version"] == "0.2.3"
+    assert len(receipt["files"]) == 6
+
+
+def test_skills_known_profiled_receipt_tamper_blocks_migration_without_mutation(tmp_path):
+    target = tmp_path / "skills"
+    _seed_profiled_skills(target, "0.2.2")
+    (target / "thinkroom-operate/SKILL.md").write_bytes(b"tampered")
+    before = _skills_tree_snapshot(target)
+
+    with pytest.raises(ValueError, match="DIVERGED"):
+        install(target)
+    assert _skills_tree_snapshot(target) == before
 
 
 def test_skills_known_preprofile_receipt_can_be_uninstalled(tmp_path):

@@ -45,6 +45,52 @@ _KNOWN_PREVIOUS_RECEIPTS = {
             ),
         },
     },
+    "5f999b5e4bcb26073bfc0a97eafa8422fadbaa122b9dd6583fa0886b32df6568": {
+        "bundle_version": "0.2.1",
+        "files": {
+            "thinkroom-install/SKILL.md": (
+                "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c"
+            ),
+            "thinkroom-install/agents/openai.yaml": (
+                "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2"
+            ),
+            "thinkroom-operate/SKILL.md": (
+                "4cc408d77e97e386523541c3c0306b45c322bf631003512b3296526f6e54d5a0"
+            ),
+            "thinkroom-operate/agents/openai.yaml": (
+                "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823"
+            ),
+            "thinkroom-trigger/SKILL.md": (
+                "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
+            ),
+            "thinkroom-trigger/agents/openai.yaml": (
+                "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e"
+            ),
+        },
+    },
+    "c24944688e4a6e0b95a8d43c8e4e9177d9ec0388dc2dc9bd1cb1c88d6614975a": {
+        "bundle_version": "0.2.2",
+        "files": {
+            "thinkroom-install/SKILL.md": (
+                "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c"
+            ),
+            "thinkroom-install/agents/openai.yaml": (
+                "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2"
+            ),
+            "thinkroom-operate/SKILL.md": (
+                "9f282ae764d72efa74f98044978aa6d128adb89fec8cbcc8e21c3861977be6f6"
+            ),
+            "thinkroom-operate/agents/openai.yaml": (
+                "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823"
+            ),
+            "thinkroom-trigger/SKILL.md": (
+                "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
+            ),
+            "thinkroom-trigger/agents/openai.yaml": (
+                "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e"
+            ),
+        },
+    },
 }
 
 

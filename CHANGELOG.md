@@ -4,6 +4,13 @@ All notable changes to Thinkroom are documented here.
 
 ## Unreleased
 
+## 0.2.3 — 2026-09-01
+
+### Fixed
+
+- Managed Skills now migrate directly from the exact six-file v0.2.1 and v0.2.2 receipts while
+  continuing to reject unknown receipts and modified payloads without mutating the target tree.
+
 ## 0.2.2 — 2026-08-31
 
 ### Fixed
