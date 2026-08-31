@@ -284,10 +284,15 @@ def _validate_prime_argv_setting(
 _PRIME_RPC_RAW_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
 _PRIME_CHILD_CLEANUP_MARKER_PREFIX = "THINKROOM_CHILD_CLEANED:"
+_PRIME_CHILD_ID_MARKER_PREFIX = "THINKROOM_CHILD_ID:"
 
 
 def _prime_child_cleanup_marker(child_name: str) -> str:
     return f"{_PRIME_CHILD_CLEANUP_MARKER_PREFIX}{child_name}"
+
+
+def _prime_child_id_marker(child_id: str) -> str:
+    return f"{_PRIME_CHILD_ID_MARKER_PREFIX}{child_id}"
 
 
 def _prime_child_cleanup_recipe(child_name: str) -> str:
@@ -295,6 +300,9 @@ def _prime_child_cleanup_recipe(child_name: str) -> str:
     return "\n".join(
         [
             "import asyncio as _asyncio",
+            "_expected_child_id = getattr(_thinkroom_child, 'rlm_child_id', None)",
+            "if not isinstance(_expected_child_id, str) or not _expected_child_id:",
+            "    raise RuntimeError('Thinkroom RLM admission handle omitted identity')",
             "_child = None",
             "for _poll in range(30):",
             "    _children = await rlm.list_subagents()",
@@ -303,6 +311,8 @@ def _prime_child_cleanup_recipe(child_name: str) -> str:
             f"    _matches = [c for c in _children if c.session_name == {child_name!r}]",
             "    if len(_matches) > 1:",
             "        raise RuntimeError('multiple matching Thinkroom RLM children')",
+            "    if len(_matches) == 1 and _matches[0].rlm_child_id != _expected_child_id:",
+            "        raise RuntimeError('Thinkroom RLM child identity changed before cleanup')",
             "    if len(_matches) == 1 and _matches[0].status == 'completed':",
             "        _child = _matches[0]",
             "        break",
@@ -311,7 +321,9 @@ def _prime_child_cleanup_recipe(child_name: str) -> str:
             "    await _asyncio.sleep(1)",
             "if _child is None:",
             "    raise RuntimeError('Thinkroom RLM child did not complete before cleanup deadline')",
-            "await rlm.delete_subagent(_child)",
+            "_deleted_child = await rlm.delete_subagent(_child)",
+            "if getattr(_deleted_child, 'rlm_child_id', None) != _expected_child_id:",
+            "    raise RuntimeError('Thinkroom RLM cleanup receipt identity changed')",
             "for _poll in range(20):",
             "    _remaining = await rlm.list_subagents()",
             "    if not _remaining:",
@@ -322,6 +334,7 @@ def _prime_child_cleanup_recipe(child_name: str) -> str:
             "else:",
             "    raise RuntimeError('Thinkroom RLM child cleanup was not confirmed')",
             f"print({marker!r})",
+            "print(f'THINKROOM_CHILD_ID:{_expected_child_id}')",
         ]
     )
 
@@ -478,7 +491,8 @@ class PrimeAgentBackend:
         prompt = (
             "Act only as a structured Thinkroom research provider. Do not read or write files, "
             "run shell commands, or perform external effects. Use the persistent IPython kernel "
-            "and call the preloaded rlm exactly once. Name the child "
+            "and call the preloaded rlm exactly once. Assign its returned admission handle to "
+            "the exact variable `_thinkroom_child` and name the child "
             f"{child_name}. Give that child the complete PROVIDER_REQUEST_JSON below and instruct "
             "it to solve the requested research phase independently, then send its findings to "
             "the parent with agent_message.send(receiver_role='parent'). End the first turn after "
@@ -874,6 +888,15 @@ class PrimeAgentBackend:
                             raise BackendError(
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent RLM child cleanup did not complete successfully",
+                            )
+                        if child_snapshot_id is not None and not _prime_tool_result_contains(
+                            event,
+                            _prime_child_id_marker(child_snapshot_id),
+                            cleanup_tool_call_id,
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child cleanup identity did not match observed child",
                             )
                         if (
                             not child_message_received

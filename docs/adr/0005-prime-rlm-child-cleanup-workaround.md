@@ -16,10 +16,13 @@ For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recip
 
 1. wait until the RPC stream exposes either a matching legacy child `agent_message` or a Prime 0.8.1
    lifecycle series with one stable child ID, the requested session name, completed status, and
-   `repliedSinceTask=true`;
+   eventual `repliedSinceTask=true` (the optional field may be absent from early snapshots but that
+   absence never establishes custody);
 2. boundedly poll the invocation-local direct-child registry;
-3. reject any unexpected sibling and select exactly one completed child with the requested Thinkroom session name;
-4. delete that child through `rlm.delete_subagent(child)`;
+3. reject any unexpected sibling and select exactly one completed child whose session name and
+   `rlm_child_id` match the original `rlm(...)` admission handle;
+4. delete that child through `rlm.delete_subagent(child)` and require the returned child identity to
+   match the same admission handle;
 5. boundedly poll the registry again and fail unless it becomes empty;
 6. print the exact phase-bound cleanup marker;
 7. treat successful cleanup as a session seal: reject any later tool execution or child custody;
@@ -31,7 +34,8 @@ For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recip
 - exactly one IPython `tool_execution_start` whose normalized code exactly matches the supplied
   cleanup recipe; and
 - a later, non-error IPython `tool_execution_end` with the same bounded `toolCallId` whose result
-  content contains the expected marker as one complete output line;
+  content contains the expected marker as one complete output line and, for lifecycle custody, an
+  identity line matching the streamed child ID;
 - a later standalone terminal assistant `message_end`; and
 - an `agent_end` transcript whose terminal text matches that observed terminal. A legacy aggregate
   has exactly one matching child message and one terminal assistant after it; a Prime 0.8.1 aggregate

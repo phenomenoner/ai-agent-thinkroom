@@ -148,12 +148,18 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   instruct the parent to call preloaded `rlm(...)` exactly once with one predictably named child and
   SHALL return phase JSON only after the same RPC stream first exposes either a matching legacy
   child `agent_message` or a matching Prime 0.8.1 child-lifecycle series with one stable child ID,
-  the requested session name, completed status, and `repliedSinceTask=true`. An exact IPython cleanup
-  recipe then boundedly polls for that named child's
-  completed status, rejects any unexpected direct child, removes it from the parent registry,
+  the requested session name, completed status, and eventual `repliedSinceTask=true`. The field may
+  be absent from an early snapshot because it is optional in Prime 0.8.1, but absence SHALL NOT
+  establish custody. The parent SHALL retain the original `rlm(...)` admission handle. An exact
+  IPython cleanup recipe then boundedly polls for that named child's completed status, rejects any
+  unexpected direct child, requires the original admission-handle ID to match the current singleton
+  registry entry, removes that exact child from the parent registry, verifies the deletion receipt
+  carries the same ID,
   confirms the invocation-local direct-child registry is empty, and emits the expected cleanup marker
-  from that same correlated tool call, and finally a later terminal assistant `message_end` appears
-  and matches the terminal message in `agent_end`. A legacy aggregate transcript SHALL contain exactly
+  plus that ID from the same correlated tool call. For lifecycle custody, the adapter SHALL match the
+  cleanup identity line to the streamed child ID before accepting terminal output. Finally a later
+  terminal assistant `message_end` appears and matches the terminal message in `agent_end`. A legacy
+  aggregate transcript SHALL contain exactly
   one child message from the requested child and exactly one terminal assistant after that child. A
   Prime 0.8.1 aggregate, which does not repeat lifecycle custody as a custom transcript message, SHALL
   contain no child message and exactly one textual terminal assistant across the aggregate. Both forms
@@ -162,8 +168,9 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   before child custody, an unexpected or repeated child or terminal assistant,
   duplicate/replayed cleanup calls or results, any post-cleanup tool execution or child custody, an
   aggregate-only terminal message, and a marker without the matching executed recipe and `toolCallId`
-  are not cleanup evidence. Missing, malformed, unexpected, replaced, non-replying, or non-completed
-  child lifecycle snapshots SHALL fail closed and SHALL NOT be inferred from a parent answer. Coding
+  are not cleanup evidence. Missing lifecycle proof, malformed child fields, an unexpected or
+  replaced child, a child without eventual reply proof, and a non-completed child SHALL fail closed
+  and SHALL NOT be inferred from a parent answer. Coding
   context is bounded
   request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.

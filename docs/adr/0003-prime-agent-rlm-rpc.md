@@ -29,9 +29,12 @@ Thinkroom sends one LF-terminated RPC prompt. It accepts phase JSON only when th
 proves prompt admission and child custody. Legacy Prime streams may expose a child `agent_message`
 whose relationship and session name match the requested child. Prime Agent 0.8.1 instead exposes
 child lifecycle snapshots; Thinkroom binds one stable child ID to the requested session name and
-requires completed status plus `repliedSinceTask=true`. Both paths still require confirmed cleanup
-and a later successful assistant message. An early parent answer, wrong or replaced child, or JSON
-without child reply proof is not a successful provider result.
+requires completed status plus an eventual `repliedSinceTask=true`; early snapshots may omit that
+optional field but cannot establish custody. The lifecycle path also requires the original admission
+handle, streamed snapshot, current registry child, deletion receipt, and cleanup marker to carry the
+same child ID. Both paths still require confirmed cleanup and a later successful assistant message.
+An early parent answer, wrong or replaced child, or JSON without child reply proof is not a successful
+provider result.
 
 This proves custody of a reply from the requested child through Prime's host-observed stream metadata,
 not the semantic equivalence of the parent synthesis to the child's private text. Prime Agent remains

@@ -1638,13 +1638,17 @@ async def test_prime_cleanup_rejects_extra_direct_child_before_delete():
     from thinkroom import backends as backend_module
 
     class Child:
-        def __init__(self, name):
+        def __init__(self, name, child_id):
             self.session_name = name
+            self.rlm_child_id = child_id
             self.status = "completed"
 
     class FakeRlm:
         def __init__(self):
-            self.children = [Child("thinkroom-frame-worker"), Child("unexpected-worker")]
+            self.children = [
+                Child("thinkroom-frame-worker", "child-1"),
+                Child("unexpected-worker", "child-2"),
+            ]
             self.deleted = []
 
         async def list_subagents(self):
@@ -1655,13 +1659,15 @@ async def test_prime_cleanup_rejects_extra_direct_child_before_delete():
             self.children.remove(child)
 
     recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
-    source = "async def run(rlm):\n" + "\n".join(f"    {line}" for line in recipe.splitlines())
+    source = "async def run(rlm, _thinkroom_child):\n" + "\n".join(
+        f"    {line}" for line in recipe.splitlines()
+    )
     namespace = {}
     exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
     rlm = FakeRlm()
 
     with pytest.raises(RuntimeError, match="unexpected direct Prime RLM child"):
-        await namespace["run"](rlm)
+        await namespace["run"](rlm, Child("thinkroom-frame-worker", "child-1"))
 
     assert rlm.deleted == []
 
@@ -1671,13 +1677,14 @@ async def test_prime_cleanup_rejects_extra_direct_child_after_delete():
     from thinkroom import backends as backend_module
 
     class Child:
-        def __init__(self, name):
+        def __init__(self, name, child_id):
             self.session_name = name
+            self.rlm_child_id = child_id
             self.status = "completed"
 
     class FakeRlm:
         def __init__(self):
-            self.children = [Child("thinkroom-frame-worker")]
+            self.children = [Child("thinkroom-frame-worker", "child-1")]
             self.deleted = []
 
         async def list_subagents(self):
@@ -1685,18 +1692,90 @@ async def test_prime_cleanup_rejects_extra_direct_child_after_delete():
 
         async def delete_subagent(self, child):
             self.deleted.append(child)
-            self.children = [Child("unexpected-worker")]
+            self.children = [Child("unexpected-worker", "child-2")]
+            return child
 
     recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
-    source = "async def run(rlm):\n" + "\n".join(f"    {line}" for line in recipe.splitlines())
+    source = "async def run(rlm, _thinkroom_child):\n" + "\n".join(
+        f"    {line}" for line in recipe.splitlines()
+    )
     namespace = {}
     exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
     rlm = FakeRlm()
 
     with pytest.raises(RuntimeError, match="unexpected direct Prime RLM child after cleanup"):
-        await namespace["run"](rlm)
+        await namespace["run"](rlm, Child("thinkroom-frame-worker", "child-1"))
 
     assert len(rlm.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_prime_cleanup_rejects_same_name_replacement_before_delete():
+    from thinkroom import backends as backend_module
+
+    class Child:
+        def __init__(self, child_id):
+            self.rlm_child_id = child_id
+            self.session_name = "thinkroom-frame-worker"
+            self.status = "completed"
+
+    class FakeRlm:
+        def __init__(self):
+            self.children = [Child("child-replacement")]
+            self.deleted = []
+
+        async def list_subagents(self):
+            return list(self.children)
+
+        async def delete_subagent(self, child):
+            self.deleted.append(child)
+            self.children.remove(child)
+            return child
+
+    recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
+    source = "async def run(rlm, _thinkroom_child):\n" + "\n".join(
+        f"    {line}" for line in recipe.splitlines()
+    )
+    namespace = {}
+    exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
+    rlm = FakeRlm()
+
+    with pytest.raises(RuntimeError, match="identity changed before cleanup"):
+        await namespace["run"](rlm, Child("child-original"))
+
+    assert rlm.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_prime_cleanup_rejects_changed_delete_receipt():
+    from thinkroom import backends as backend_module
+
+    class Child:
+        def __init__(self, child_id):
+            self.rlm_child_id = child_id
+            self.session_name = "thinkroom-frame-worker"
+            self.status = "completed"
+
+    class FakeRlm:
+        def __init__(self):
+            self.children = [Child("child-original")]
+
+        async def list_subagents(self):
+            return list(self.children)
+
+        async def delete_subagent(self, child):
+            self.children.remove(child)
+            return Child("child-replacement")
+
+    recipe = backend_module._prime_child_cleanup_recipe("thinkroom-frame-worker")
+    source = "async def run(rlm, _thinkroom_child):\n" + "\n".join(
+        f"    {line}" for line in recipe.splitlines()
+    )
+    namespace = {}
+    exec(compile(source, "<prime-cleanup-recipe>", "exec"), namespace)
+
+    with pytest.raises(RuntimeError, match="cleanup receipt identity changed"):
+        await namespace["run"](FakeRlm(), Child("child-original"))
 
 
 @pytest.mark.asyncio
@@ -1829,6 +1908,8 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
     assert "agent_message" in prompt
     assert "rlm.list_subagents" in prompt
     assert "rlm.delete_subagent" in prompt
+    assert "_thinkroom_child" in prompt
+    assert "rlm_child_id" in prompt
     assert "for _poll in range(30)" in prompt
     assert "await _asyncio.sleep(1)" in prompt
     assert "THINKROOM_CHILD_CLEANED:thinkroom-frame-worker" in prompt
@@ -1865,17 +1946,19 @@ async def test_prime_backend_accepts_v081_child_lifecycle_custody_without_custom
         "command = json.loads(sys.stdin.readline())\n"
         "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
         "'success': True}), flush=True)\n"
-        "for status, replied in [('queued', False), ('running', False), ('done', True)]:\n"
-        "    print(json.dumps({'type': 'rlm_child_update', 'child': {"
-        "'id': 'child-1', 'sessionName': 'thinkroom-frame-worker', 'label': 'worker', "
-        "'status': status, 'sessionDir': '/tmp/child', "
-        "'repliedSinceTask': replied}}), flush=True)\n"
+        "for status, replied in [('queued', None), ('running', False), ('done', True)]:\n"
+        "    child = {'id': 'child-1', 'sessionName': 'thinkroom-frame-worker', "
+        "'label': 'worker', 'status': status, 'sessionDir': '/tmp/child'}\n"
+        "    if replied is not None:\n"
+        "        child['repliedSinceTask'] = replied\n"
+        "    print(json.dumps({'type': 'rlm_child_update', 'child': child}), flush=True)\n"
         "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
         "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
         "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
         "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
         "'toolCallId': 'cleanup-1', 'isError': False, "
-        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker\\n"
+        "THINKROOM_CHILD_ID:child-1'}), flush=True)\n"
         "result = json.dumps({'schema_version':1,'decision':'d','scope':'s',"
         "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
         "'research_questions':['q']})\n"
@@ -1914,6 +1997,61 @@ async def test_prime_backend_accepts_v081_child_lifecycle_custody_without_custom
     assert result["decision"] == "d"
 
 
+@pytest.mark.asyncio
+async def test_prime_backend_rejects_v081_cleanup_receipt_for_different_child(tmp_path):
+    executable = tmp_path / "prime-v081-cleanup-id-mismatch"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "print(json.dumps({'type': 'rlm_child_update', 'child': {"
+        "'id': 'child-original', 'sessionName': 'thinkroom-frame-worker', 'label': 'worker', "
+        "'status': 'done', 'sessionDir': '/tmp/child', "
+        "'repliedSinceTask': True}}), flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker\\n"
+        "THINKROOM_CHILD_ID:child-replacement'}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']})\n"
+        "terminal = {'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}\n"
+        "print(json.dumps({'type': 'message_end', 'message': terminal}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': [terminal]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000).invoke(
+            request
+        )
+
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert "cleanup identity did not match" in str(caught.value)
+
+
 @pytest.mark.parametrize(
     ("scenario", "message"),
     [
@@ -1948,7 +2086,8 @@ async def test_prime_backend_rejects_invalid_v081_child_lifecycle(
         "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}\n"
         "end = {'type': 'tool_execution_end', 'toolName': 'ipython', "
         "'toolCallId': 'cleanup-1', 'isError': False, "
-        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}\n"
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker\\n"
+        "THINKROOM_CHILD_ID:child-1'}\n"
         "print(json.dumps(response), flush=True)\n"
         "scenario = os.environ['SCENARIO']\n"
         "if scenario == 'unexpected':\n"

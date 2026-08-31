@@ -239,6 +239,8 @@ does not copy OAuth credentials into Thinkroom; Prime Agent reads and refreshes 
 store. Each Thinkroom provider invocation opens one bounded RPC session, requests one native RLM
 child, and accepts schema JSON only after the same RPC stream proves either a matching legacy child
 message or a stable Prime 0.8.1 child lifecycle that completed and explicitly replied to the parent.
+For the lifecycle path, the admission handle, streamed snapshot, current registry entry, and cleanup
+receipt must all carry the same child ID.
 The invocation uses a temporary working/session directory and removes it after process settlement.
 The concurrency and timeout values above are a conservative starting point for root-plus-child model
 work, not a universal capacity claim; tune them from observed provider latency and quotas.
