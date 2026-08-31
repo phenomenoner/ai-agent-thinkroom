@@ -12,9 +12,11 @@ The project explicitly accepts the bounded interim risk of adding lifecycle garb
 
 ## Decision
 
-For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recipe in the original provider prompt. After the matching child `agent_message` arrives and before terminal phase JSON, the parent must:
+For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recipe in the original provider prompt. After a matching child reply is proven and before terminal phase JSON, the parent must:
 
-1. wait until the RPC stream exposes the matching child `agent_message`;
+1. wait until the RPC stream exposes either a matching legacy child `agent_message` or a Prime 0.8.1
+   lifecycle series with one stable child ID, the requested session name, completed status, and
+   `repliedSinceTask=true`;
 2. boundedly poll the invocation-local direct-child registry;
 3. reject any unexpected sibling and select exactly one completed child with the requested Thinkroom session name;
 4. delete that child through `rlm.delete_subagent(child)`;
@@ -25,14 +27,15 @@ For every Prime-backed phase, Thinkroom supplies one exact IPython cleanup recip
 
 `PrimeAgentBackend` accepts the terminal JSON only after the same RPC invocation contains, in order:
 
-- the matching child message;
+- the matching legacy child message or Prime 0.8.1 lifecycle reply proof;
 - exactly one IPython `tool_execution_start` whose normalized code exactly matches the supplied
   cleanup recipe; and
 - a later, non-error IPython `tool_execution_end` with the same bounded `toolCallId` whose result
   content contains the expected marker as one complete output line;
 - a later standalone terminal assistant `message_end`; and
-- an `agent_end` transcript with exactly one terminal assistant after the child, whose text matches
-  that observed terminal, and whose only child custody message is the one matching the requested child.
+- an `agent_end` transcript whose terminal text matches that observed terminal. A legacy aggregate
+  has exactly one matching child message and one terminal assistant after it; a Prime 0.8.1 aggregate
+  has no custom child message and exactly one textual terminal assistant across the aggregate.
 
 Cleanup before child custody, duplicate/replayed cleanup calls or results, and a marker without the
 matching executed recipe are rejected. An aggregate-only or repeated terminal, a repeated or

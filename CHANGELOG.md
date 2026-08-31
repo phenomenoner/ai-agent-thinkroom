@@ -2,6 +2,16 @@
 
 All notable changes to Thinkroom are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Prime Agent 0.8.1 RLM custody now uses the runtime's stable child lifecycle snapshots and
+  `repliedSinceTask` signal when custom child messages are absent from the RPC transcript. The
+  adapter still requires completed exact-child evidence, exact cleanup, a post-cleanup terminal,
+  and aggregate reconciliation; unexpected, replaced, non-replying, or incomplete children fail
+  closed.
+
 ## 0.2.1 — 2026-08-30
 
 ### Added

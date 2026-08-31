@@ -558,6 +558,10 @@ class PrimeAgentBackend:
                 event_count = 0
                 prompt_accepted = False
                 child_message_received = False
+                child_snapshot_id: str | None = None
+                child_snapshot_status: str | None = None
+                child_snapshot_replied = False
+                child_snapshot_completed = False
                 cleanup_tool_call_id: str | None = None
                 cleanup_observed = False
                 post_cleanup_terminal_text: str | None = None
@@ -660,6 +664,87 @@ class PrimeAgentBackend:
                             )
                         prompt_accepted = True
                         continue
+                    if event.get("type") == "rlm_child_update":
+                        child = event.get("child")
+                        if not isinstance(child, dict):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child update omitted lifecycle metadata",
+                            )
+                        candidate_id = child.get("id")
+                        session_name = child.get("sessionName")
+                        status = child.get("status")
+                        replied_value = child.get("repliedSinceTask")
+                        replied = replied_value is True
+                        if (
+                            not isinstance(candidate_id, str)
+                            or not candidate_id
+                            or "\x00" in candidate_id
+                            or len(candidate_id.encode("utf-8")) > 256
+                            or not isinstance(session_name, str)
+                            or not session_name
+                            or "\x00" in session_name
+                            or len(session_name.encode("utf-8")) > 256
+                            or status not in {"queued", "running", "done", "error", "cancelled"}
+                            or (replied_value is not None and type(replied_value) is not bool)
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child update was invalid",
+                            )
+                        if session_name != child_name:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted an unexpected RLM child",
+                            )
+                        if child_snapshot_id is None:
+                            child_snapshot_id = candidate_id
+                        elif child_snapshot_id != candidate_id:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent replaced the expected RLM child identity",
+                            )
+                        if cleanup_observed:
+                            if (
+                                status == "cancelled"
+                                and child_snapshot_replied
+                                and child_snapshot_completed
+                            ):
+                                continue
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted child custody after RLM child cleanup",
+                            )
+                        if child_snapshot_replied and replied_value is False:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child reply evidence regressed",
+                            )
+                        lifecycle_rank = {"queued": 0, "running": 1, "done": 2}
+                        if (
+                            child_snapshot_status in lifecycle_rank
+                            and status in lifecycle_rank
+                            and lifecycle_rank[status] < lifecycle_rank[child_snapshot_status]
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child lifecycle status regressed",
+                            )
+                        if child_snapshot_status == "done" and status not in {"done", "cancelled"}:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent RLM child lifecycle status regressed",
+                            )
+                        if status == "error" or (
+                            status == "cancelled" and cleanup_tool_call_id is None
+                        ):
+                            raise BackendError(
+                                "PROVIDER_ERROR", "Prime Agent RLM child failed before cleanup"
+                            )
+                        child_snapshot_replied = child_snapshot_replied or replied
+                        child_snapshot_completed = child_snapshot_completed or status == "done"
+                        child_snapshot_status = status
+                        continue
                     if (
                         event.get("type") == "custom_message"
                         and event.get("customType") == "agent_message"
@@ -674,6 +759,11 @@ class PrimeAgentBackend:
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent emitted child custody after RLM child cleanup",
                             )
+                        if is_child_message(child_event) and not child_message_matches(child_event):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted an unexpected RLM child",
+                            )
                         child_message_received = child_message_received or child_message_matches(
                             child_event
                         )
@@ -686,9 +776,15 @@ class PrimeAgentBackend:
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent emitted child custody after RLM child cleanup",
                             )
+                        if is_child_message(message) and not matched_child:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent emitted an unexpected RLM child",
+                            )
                         child_message_received = child_message_received or matched_child
                         text = assistant_text(message)
-                        if not child_message_received and text is not None:
+                        child_custody_received = child_message_received or child_snapshot_replied
+                        if not child_custody_received and text is not None:
                             try:
                                 parse_json_object(text)
                             except BackendError:
@@ -698,7 +794,7 @@ class PrimeAgentBackend:
                                     "MALFORMED_PROVIDER_OUTPUT",
                                     "Prime Agent emitted final JSON before child custody",
                                 )
-                        elif child_message_received and not cleanup_observed and not matched_child:
+                        elif child_custody_received and not cleanup_observed and not matched_child:
                             if text is not None:
                                 try:
                                     parse_json_object(text)
@@ -736,7 +832,9 @@ class PrimeAgentBackend:
                             "Prime Agent executed a tool after RLM child cleanup",
                         )
                     if ipython_code is not None and ipython_code.strip() == cleanup_recipe.strip():
-                        if not prompt_accepted or not child_message_received:
+                        if not prompt_accepted or not (
+                            child_message_received or child_snapshot_replied
+                        ):
                             raise BackendError(
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent began RLM child cleanup before child custody",
@@ -777,6 +875,15 @@ class PrimeAgentBackend:
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent RLM child cleanup did not complete successfully",
                             )
+                        if (
+                            not child_message_received
+                            and child_snapshot_replied
+                            and not child_snapshot_completed
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent omitted completed RLM child lifecycle evidence",
+                            )
                         cleanup_observed = True
                         continue
                     if event.get("type") != "agent_end":
@@ -795,16 +902,27 @@ class PrimeAgentBackend:
                     child_indexes = [
                         index for index, message in enumerate(messages) if is_child_message(message)
                     ]
-                    if child_indexes != matching_child_indexes or len(matching_child_indexes) != 1:
-                        raise BackendError(
-                            "MALFORMED_PROVIDER_OUTPUT",
-                            "Prime Agent emitted child custody after RLM child cleanup",
-                        )
-                    child_message_received = child_message_received or bool(matching_child_indexes)
+                    if child_message_received:
+                        if (
+                            child_indexes != matching_child_indexes
+                            or len(matching_child_indexes) != 1
+                        ):
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent aggregate contained child custody after RLM child cleanup",
+                            )
+                        aggregate_terminal_start = matching_child_indexes[-1] + 1
+                    else:
+                        if child_indexes:
+                            raise BackendError(
+                                "MALFORMED_PROVIDER_OUTPUT",
+                                "Prime Agent aggregate contained unexpected child custody",
+                            )
+                        aggregate_terminal_start = 0
                     if (
                         not prompt_accepted
-                        or not child_message_received
-                        or not matching_child_indexes
+                        or not (child_message_received or child_snapshot_replied)
+                        or (not child_message_received and not child_snapshot_completed)
                     ):
                         continue
                     if cleanup_tool_call_id is None or not cleanup_observed:
@@ -814,7 +932,7 @@ class PrimeAgentBackend:
                         )
                     terminal_texts = [
                         text
-                        for message in messages[matching_child_indexes[-1] + 1 :]
+                        for message in messages[aggregate_terminal_start:]
                         if (text := assistant_text(message)) is not None
                     ]
                     if not terminal_texts:

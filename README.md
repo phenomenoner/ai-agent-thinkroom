@@ -237,7 +237,8 @@ Authenticate that [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent
 with its interactive `/login` flow. The adapter
 does not copy OAuth credentials into Thinkroom; Prime Agent reads and refreshes its own credential
 store. Each Thinkroom provider invocation opens one bounded RPC session, requests one native RLM
-child, and accepts schema JSON only after a matching child `agent_message` reaches the parent.
+child, and accepts schema JSON only after the same RPC stream proves either a matching legacy child
+message or a stable Prime 0.8.1 child lifecycle that completed and explicitly replied to the parent.
 The invocation uses a temporary working/session directory and removes it after process settlement.
 The concurrency and timeout values above are a conservative starting point for root-plus-child model
 work, not a universal capacity claim; tune them from observed provider latency and quotas.

@@ -25,14 +25,17 @@ session with:
 - optional provider, model, and thinking arguments from the namespaced Thinkroom settings;
 - one predictably named `rlm(...)` child requested by an exact-once parent instruction.
 
-Thinkroom sends one LF-terminated RPC prompt. It accepts phase JSON only when the same transcript
-proves prompt admission, contains a child `agent_message` whose relationship and session name match
-the requested child, and contains a later successful assistant message. An early parent answer,
-wrong child, or JSON without child proof is not a successful provider result.
+Thinkroom sends one LF-terminated RPC prompt. It accepts phase JSON only when the same RPC stream
+proves prompt admission and child custody. Legacy Prime streams may expose a child `agent_message`
+whose relationship and session name match the requested child. Prime Agent 0.8.1 instead exposes
+child lifecycle snapshots; Thinkroom binds one stable child ID to the requested session name and
+requires completed status plus `repliedSinceTask=true`. Both paths still require confirmed cleanup
+and a later successful assistant message. An early parent answer, wrong or replaced child, or JSON
+without child reply proof is not a successful provider result.
 
-This proves custody of the requested child result, not the absence of an additional silent child that
-never appears in the accepted transcript. Prime Agent remains responsible for enforcing its own child
-admission semantics.
+This proves custody of a reply from the requested child through Prime's host-observed stream metadata,
+not the semantic equivalence of the parent synthesis to the child's private text. Prime Agent remains
+responsible for enforcing its own child admission and `repliedSinceTask` semantics.
 
 ## Bounds and failure semantics
 
@@ -74,8 +77,9 @@ port.
   research domain or persistence model.
 - One RLM child per phase increases latency and provider usage. Operators should start with bounded
   concurrency and tune only from observed capacity.
-- Compatibility depends on Prime Agent's JSONL RPC, IPython tool, `rlm(...)`, `agent_message`, and
-  transcript event contract. v0.2.0 was exercised with Prime Agent 0.8.1; other versions require the
+- Compatibility depends on Prime Agent's JSONL RPC, IPython tool, `rlm(...)`, `agent_message`, child
+  lifecycle snapshots, and transcript event contract. v0.2 was exercised with Prime Agent 0.8.1;
+  other versions require the
   focused adapter tests and live smoke.
 - A real-provider smoke proves integration and child admission, not research correctness or model
   quality.

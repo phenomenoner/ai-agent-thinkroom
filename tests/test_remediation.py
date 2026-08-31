@@ -1855,6 +1855,157 @@ async def test_prime_backend_uses_supported_flags_schema_and_stream_limit(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_prime_backend_accepts_v081_child_lifecycle_custody_without_custom_transcript(
+    tmp_path,
+):
+    executable = tmp_path / "prime-v081-lifecycle"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "for status, replied in [('queued', False), ('running', False), ('done', True)]:\n"
+        "    print(json.dumps({'type': 'rlm_child_update', 'child': {"
+        "'id': 'child-1', 'sessionName': 'thinkroom-frame-worker', 'label': 'worker', "
+        "'status': status, 'sessionDir': '/tmp/child', "
+        "'repliedSinceTask': replied}}), flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s',"
+        "'constraints':['c'],'success_criteria':['s'],'ambiguities':['a'],"
+        "'research_questions':['q']})\n"
+        "terminal = {'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}\n"
+        "print(json.dumps({'type': 'message_end', 'message': terminal}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'user', 'content': 'request'},"
+        "{'role': 'assistant', 'content': [], 'stopReason': 'toolUse'},"
+        "{'role': 'toolResult', 'content': 'spawned'},"
+        "{'role': 'assistant', 'content': [], 'stopReason': 'toolUse'},"
+        "{'role': 'toolResult', 'content': 'cleaned'}, terminal]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    result = await PrimeAgentBackend(
+        str(executable), "", "", "off", max_response_bytes=10000
+    ).invoke(request)
+
+    assert result["decision"] == "d"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        ("unexpected", "unexpected RLM child"),
+        ("replacement", "replaced the expected RLM child identity"),
+        ("missing-reply", "before child custody"),
+        ("missing-done", "completed RLM child lifecycle evidence"),
+        ("post-cleanup", "after RLM child cleanup"),
+        ("invalid-reply-flag", "child update was invalid"),
+        ("status-regression", "lifecycle status regressed"),
+        ("reply-regression", "reply evidence regressed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_prime_backend_rejects_invalid_v081_child_lifecycle(
+    tmp_path, monkeypatch, scenario, message
+):
+    executable = tmp_path / "prime-invalid-v081-lifecycle"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "response = {'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}\n"
+        "def child(child_id='child-1', name='thinkroom-frame-worker', status='running', "
+        "replied=False):\n"
+        "    return {'type': 'rlm_child_update', 'child': {'id': child_id, "
+        "'sessionName': name, 'label': 'worker', 'status': status, "
+        "'sessionDir': '/tmp/child', 'repliedSinceTask': replied}}\n"
+        "start = {'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}\n"
+        "end = {'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}\n"
+        "print(json.dumps(response), flush=True)\n"
+        "scenario = os.environ['SCENARIO']\n"
+        "if scenario == 'unexpected':\n"
+        "    print(json.dumps(child(name='unexpected-worker')), flush=True)\n"
+        "elif scenario == 'replacement':\n"
+        "    print(json.dumps(child()), flush=True)\n"
+        "    print(json.dumps(child(child_id='child-2')), flush=True)\n"
+        "elif scenario == 'missing-reply':\n"
+        "    print(json.dumps(child(status='done')), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "elif scenario == 'missing-done':\n"
+        "    print(json.dumps(child(replied=True)), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "elif scenario == 'post-cleanup':\n"
+        "    print(json.dumps(child(status='done', replied=True)), flush=True)\n"
+        "    print(json.dumps(start), flush=True)\n"
+        "    print(json.dumps(end), flush=True)\n"
+        "    print(json.dumps(child()), flush=True)\n"
+        "elif scenario == 'status-regression':\n"
+        "    print(json.dumps(child(status='done', replied=True)), flush=True)\n"
+        "    print(json.dumps(child(status='running', replied=True)), flush=True)\n"
+        "elif scenario == 'reply-regression':\n"
+        "    print(json.dumps(child(replied=True)), flush=True)\n"
+        "    print(json.dumps(child(replied=False)), flush=True)\n"
+        "else:\n"
+        "    print(json.dumps(child(replied='yes')), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("SCENARIO", scenario)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000).invoke(
+            request
+        )
+
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert message in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_prime_backend_projects_terminal_result_before_response_byte_limit(tmp_path):
     executable = tmp_path / "prime-large-history"
     executable.write_text(

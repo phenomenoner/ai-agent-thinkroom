@@ -146,18 +146,25 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   invocation-local JSONL RPC session with only the built-in IPython tool, no context files, no
   extensions, no prompt templates, and a temporary working/session directory. Thinkroom SHALL
   instruct the parent to call preloaded `rlm(...)` exactly once with one predictably named child and
-  SHALL return phase JSON only after the same RPC stream first exposes a matching child
-  `agent_message`, then an exact IPython cleanup recipe boundedly polls for that named child's
+  SHALL return phase JSON only after the same RPC stream first exposes either a matching legacy
+  child `agent_message` or a matching Prime 0.8.1 child-lifecycle series with one stable child ID,
+  the requested session name, completed status, and `repliedSinceTask=true`. An exact IPython cleanup
+  recipe then boundedly polls for that named child's
   completed status, rejects any unexpected direct child, removes it from the parent registry,
   confirms the invocation-local direct-child registry is empty, and emits the expected cleanup marker
   from that same correlated tool call, and finally a later terminal assistant `message_end` appears
-  and matches the terminal message in `agent_end`. The aggregate transcript SHALL contain exactly one
-  child message, from the requested child, and exactly one terminal assistant after that child, and
-  SHALL be reconciled with the observed cleanup and terminal order before accepting JSON. Cleanup
+  and matches the terminal message in `agent_end`. A legacy aggregate transcript SHALL contain exactly
+  one child message from the requested child and exactly one terminal assistant after that child. A
+  Prime 0.8.1 aggregate, which does not repeat lifecycle custody as a custom transcript message, SHALL
+  contain no child message and exactly one textual terminal assistant across the aggregate. Both forms
+  SHALL be reconciled with the observed lifecycle, cleanup, and terminal order before accepting JSON.
+  Cleanup
   before child custody, an unexpected or repeated child or terminal assistant,
   duplicate/replayed cleanup calls or results, any post-cleanup tool execution or child custody, an
   aggregate-only terminal message, and a marker without the matching executed recipe and `toolCallId`
-  are not cleanup evidence. Coding context is bounded
+  are not cleanup evidence. Missing, malformed, unexpected, replaced, non-replying, or non-completed
+  child lifecycle snapshots SHALL fail closed and SHALL NOT be inferred from a parent answer. Coding
+  context is bounded
   request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.
 - Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,
