@@ -4,6 +4,18 @@ All notable changes to Thinkroom are documented here.
 
 ## Unreleased
 
+## 0.2.4 — 2026-09-01
+
+### Fixed
+
+- Prime Agent RPC telemetry no longer consumes the semantic event budget used for research output.
+  Raw transport bytes, telemetry events, semantic events, control bytes, final text, process
+  envelopes, and validated responses now fail closed under separate bounded limits with stable
+  `OUTPUT_LIMIT_EXCEEDED` audit subtypes.
+- Provider output-limit failures during initial fork generation or schema repair now use the existing
+  deterministic fork fallback instead of aborting the complete research run. Other provider and
+  timeout failures keep their previous failover behavior.
+
 ## 0.2.3 — 2026-09-01
 
 ### Fixed

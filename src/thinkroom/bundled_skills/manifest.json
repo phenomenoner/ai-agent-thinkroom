@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
-  "bundle_version": "0.2.3",
-  "product_version": "0.2.3",
+  "bundle_version": "0.2.4",
+  "product_version": "0.2.4",
   "entries": [
     {
       "path": "thinkroom-install/SKILL.md",
@@ -13,7 +13,7 @@
     },
     {
       "path": "thinkroom-operate/SKILL.md",
-      "sha256": "ecd852b0821ab0da5ec593f639b6e25aa98ef4b2eb8392b804236dacff5d904a"
+      "sha256": "81ab08453ea30a919f7ed5c31229f9d7a4150ea12925566293591dd4c7249af5"
     },
     {
       "path": "thinkroom-operate/agents/openai.yaml",

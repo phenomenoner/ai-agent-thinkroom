@@ -5259,7 +5259,7 @@ def _seed_profiled_skills(target: Path, version: str) -> None:
         entry["path"]: (bundle / entry["path"]).read_bytes() for entry in manifest["entries"]
     }
     payloads["thinkroom-operate/SKILL.md"] = payloads["thinkroom-operate/SKILL.md"].replace(
-        b"version: 0.2.3", f"version: {version}".encode()
+        b"version: 0.2.4", f"version: {version}".encode()
     )
     expected_files = historical["files"]
     assert {
@@ -5329,7 +5329,7 @@ def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     assert install(target) == planned
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
     receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
-    assert receipt["bundle_version"] == "0.2.3"
+    assert receipt["bundle_version"] == "0.2.4"
     assert len(receipt["files"]) == 6
 
 
