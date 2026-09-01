@@ -91,6 +91,29 @@ _KNOWN_PREVIOUS_RECEIPTS = {
             ),
         },
     },
+    "6f475287ce3efe4423875580484c8387f0b0715250613edefdae7b80078d7205": {
+        "bundle_version": "0.2.3",
+        "files": {
+            "thinkroom-install/SKILL.md": (
+                "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c"
+            ),
+            "thinkroom-install/agents/openai.yaml": (
+                "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2"
+            ),
+            "thinkroom-operate/SKILL.md": (
+                "ecd852b0821ab0da5ec593f639b6e25aa98ef4b2eb8392b804236dacff5d904a"
+            ),
+            "thinkroom-operate/agents/openai.yaml": (
+                "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823"
+            ),
+            "thinkroom-trigger/SKILL.md": (
+                "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99"
+            ),
+            "thinkroom-trigger/agents/openai.yaml": (
+                "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e"
+            ),
+        },
+    },
 }
 
 

@@ -5204,6 +5204,17 @@ _PROFILED_RECEIPTS = {
             "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
         },
     },
+    "0.2.3": {
+        "manifest_sha256": "6f475287ce3efe4423875580484c8387f0b0715250613edefdae7b80078d7205",
+        "files": {
+            "thinkroom-install/SKILL.md": "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c",
+            "thinkroom-install/agents/openai.yaml": "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2",
+            "thinkroom-operate/SKILL.md": "ecd852b0821ab0da5ec593f639b6e25aa98ef4b2eb8392b804236dacff5d904a",
+            "thinkroom-operate/agents/openai.yaml": "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823",
+            "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
+            "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
+        },
+    },
 }
 
 
@@ -5315,7 +5326,7 @@ def test_skills_known_crlf_preprofile_receipt_migrates_to_lf_bundle(tmp_path):
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
 
 
-@pytest.mark.parametrize("version", ["0.2.1", "0.2.2"])
+@pytest.mark.parametrize("version", ["0.2.1", "0.2.2", "0.2.3"])
 def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     target = tmp_path / "skills"
     _seed_profiled_skills(target, version)
@@ -5333,14 +5344,68 @@ def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     assert len(receipt["files"]) == 6
 
 
-def test_skills_known_profiled_receipt_tamper_blocks_migration_without_mutation(tmp_path):
+@pytest.mark.parametrize("version", ["0.2.2", "0.2.3"])
+@pytest.mark.parametrize("operation", ["install", "status", "uninstall"])
+def test_skills_known_profiled_receipt_tamper_blocks_without_mutation(version, operation, tmp_path):
+    from thinkroom import skills as skill_module
+
     target = tmp_path / "skills"
-    _seed_profiled_skills(target, "0.2.2")
+    _seed_profiled_skills(target, version)
     (target / "thinkroom-operate/SKILL.md").write_bytes(b"tampered")
     before = _skills_tree_snapshot(target)
 
-    with pytest.raises(ValueError, match="DIVERGED"):
-        install(target)
+    if operation == "status":
+        classifications = {
+            item["path"]: item["classification"] for item in skill_module.status(target)
+        }
+        assert classifications["thinkroom-operate/SKILL.md"] == "DIVERGED"
+        assert {
+            state for path, state in classifications.items() if path != "thinkroom-operate/SKILL.md"
+        } == {"EXACT"}
+    else:
+        with pytest.raises(ValueError, match="DIVERGED"):
+            getattr(skill_module, operation)(target)
+    assert _skills_tree_snapshot(target) == before
+
+
+def test_skills_known_v023_receipt_can_be_uninstalled(tmp_path):
+    from thinkroom import skills as skill_module
+
+    target = tmp_path / "skills"
+    _seed_profiled_skills(target, "0.2.3")
+    skill_module.uninstall(target)
+    assert not list(target.glob("**/SKILL.md"))
+    assert not list(target.glob("**/openai.yaml"))
+    assert not (target / ".thinkroom/skills-receipt-v1.json").exists()
+
+
+@pytest.mark.parametrize("operation", ["install", "status", "uninstall"])
+@pytest.mark.parametrize(
+    "receipt_variant", ["malformed", "unknown_manifest", "duplicate_path", "foreign_path"]
+)
+def test_skills_v023_invalid_receipt_variants_fail_without_mutation(
+    operation, receipt_variant, tmp_path
+):
+    from thinkroom import skills as skill_module
+
+    target = tmp_path / "skills"
+    _seed_profiled_skills(target, "0.2.3")
+    receipt = target / ".thinkroom/skills-receipt-v1.json"
+    if receipt_variant == "malformed":
+        receipt.write_bytes(b"not-json")
+    else:
+        data = json.loads(receipt.read_text())
+        if receipt_variant == "unknown_manifest":
+            data["manifest_sha256"] = "0" * 64
+        elif receipt_variant == "duplicate_path":
+            data["files"].append(dict(data["files"][0]))
+        else:
+            data["files"][0]["path"] = "foreign/SKILL.md"
+        receipt.write_text(json.dumps(data, indent=2) + "\n")
+    before = _skills_tree_snapshot(target)
+
+    with pytest.raises(ValueError, match="invalid receipt"):
+        getattr(skill_module, operation)(target)
     assert _skills_tree_snapshot(target) == before
 
 

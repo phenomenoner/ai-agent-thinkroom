@@ -15,6 +15,9 @@ All notable changes to Thinkroom are documented here.
 - Provider output-limit failures during initial fork generation or schema repair now use the existing
   deterministic fork fallback instead of aborting the complete research run. Other provider and
   timeout failures keep their previous failover behavior.
+- Managed Skills now migrate directly from the exact six-file v0.2.3 receipt to the v0.2.4 bundle;
+  modified payloads and unknown, malformed, duplicate, or foreign receipt authorities still fail
+  closed before mutation.
 
 ## 0.2.3 — 2026-09-01
 
