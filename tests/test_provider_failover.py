@@ -57,6 +57,24 @@ class RejectingAudit:
         return False
 
 
+class CapturingAudit:
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+
+    def start(self, request: BackendRequestV1, backend: str, model: str) -> int:
+        return 1
+
+    def finish(
+        self,
+        call_id: int,
+        request: BackendRequestV1,
+        output_status: str,
+        output_size: int = 0,
+    ) -> bool:
+        self.statuses.append(output_status)
+        return True
+
+
 class BlockingBackend:
     name = "prime:openrouter"
     model = "z-ai/glm-5.3-flash"
@@ -156,6 +174,30 @@ async def test_failover_backend_does_not_cross_provider_for_nonavailability_erro
     assert (primary.calls, fallback.calls) == (1, 0)
     assert identity.backend == "prime:openrouter"
     assert not identity.used_fallback
+
+
+@pytest.mark.asyncio
+async def test_failover_audit_preserves_output_limit_subtype_without_crossing_provider() -> None:
+    primary = StaticBackend(
+        "prime:openrouter",
+        "glm",
+        error=BackendError(
+            "OUTPUT_LIMIT_EXCEEDED",
+            "raw transport exceeded byte limit",
+            audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+        ),
+    )
+    fallback = StaticBackend("prime:openai-codex", "terra")
+    backend = FailoverBackend(primary, fallback)
+    audit = CapturingAudit()
+
+    with pytest.raises(BackendError) as raised:
+        await backend.invoke_with_audit(frame_request(), audit)
+
+    assert raised.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert raised.value.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
+    assert audit.statuses == ["OUTPUT_LIMIT_RAW_TRANSPORT"]
+    assert (primary.calls, fallback.calls) == (1, 0)
 
 
 @pytest.mark.asyncio

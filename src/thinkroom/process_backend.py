@@ -18,12 +18,23 @@ _NORMAL_EXIT_GRACE_SECONDS = 2.0
 
 
 def _safe_error(exc: BaseException) -> dict[str, Any]:
-    if type(exc) is BackendError and type(exc.code) is str and type(str(exc)) is str:
-        return {"kind": "backend_error", "code": exc.code, "message": str(exc)}
+    if (
+        type(exc) is BackendError
+        and type(exc.code) is str
+        and type(exc.audit_status) is str
+        and type(str(exc)) is str
+    ):
+        return {
+            "kind": "backend_error",
+            "code": exc.code,
+            "message": str(exc),
+            "audit_status": exc.audit_status,
+        }
     return {
         "kind": "backend_error",
         "code": "PROVIDER_ERROR",
         "message": "provider invocation failed",
+        "audit_status": "PROVIDER_ERROR",
     }
 
 
@@ -52,6 +63,7 @@ async def _run_child(
                     "kind": "backend_error",
                     "code": "OUTPUT_LIMIT_EXCEEDED",
                     "message": "provider response exceeded byte limit",
+                    "audit_status": "OUTPUT_LIMIT_PROCESS_ENVELOPE",
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -270,11 +282,16 @@ class ProcessIsolatedBackend:
             if envelope["kind"] == "backend_error":
                 code = envelope.get("code")
                 message = envelope.get("message")
-                if type(code) is not str or type(message) is not str:
+                audit_status = envelope.get("audit_status")
+                if (
+                    type(code) is not str
+                    or type(message) is not str
+                    or type(audit_status) is not str
+                ):
                     raise BackendError(
                         "MALFORMED_PROVIDER_OUTPUT", "provider process returned invalid data"
                     )
-                raise BackendError(code, message)
+                raise BackendError(code, message, audit_status=audit_status)
             value = envelope.get("value")
             if not isinstance(value, dict):
                 raise BackendError(

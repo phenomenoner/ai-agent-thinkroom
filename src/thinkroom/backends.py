@@ -251,7 +251,9 @@ class OpenAIBackend:
                     total += len(chunk)
                     if total > self.max_response_bytes:
                         raise BackendError(
-                            "OUTPUT_LIMIT_EXCEEDED", "provider response exceeded byte limit"
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "provider response exceeded byte limit",
+                            audit_status="OUTPUT_LIMIT_PROVIDER_RESPONSE",
                         )
                     chunks.append(chunk)
         try:
@@ -283,6 +285,7 @@ def _validate_prime_argv_setting(
 
 _PRIME_RPC_RAW_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
+_PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT = 200_000
 _PRIME_CHILD_CLEANUP_MARKER_PREFIX = "THINKROOM_CHILD_CLEANED:"
 _PRIME_CHILD_ID_MARKER_PREFIX = "THINKROOM_CHILD_ID:"
 
@@ -570,6 +573,7 @@ class PrimeAgentBackend:
                 raw_transport_bytes = 0
                 control_event_bytes = 0
                 event_count = 0
+                telemetry_event_count = 0
                 prompt_accepted = False
                 child_message_received = False
                 child_snapshot_id: str | None = None
@@ -629,6 +633,7 @@ class PrimeAgentBackend:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent RPC event exceeded byte limit",
+                            audit_status="OUTPUT_LIMIT_RPC_EVENT_BYTES",
                         ) from exc
                     if not line:
                         returncode = await rpc_proc.wait()
@@ -645,12 +650,7 @@ class PrimeAgentBackend:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent RPC raw transport exceeded byte limit",
-                        )
-                    event_count += 1
-                    if event_count > _PRIME_RPC_EVENT_COUNT_LIMIT:
-                        raise BackendError(
-                            "OUTPUT_LIMIT_EXCEEDED",
-                            "Prime Agent RPC exceeded the event-count limit",
+                            audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
                         )
                     try:
                         event = json.loads(line)
@@ -664,12 +664,29 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC event was not an object",
                         )
+                    if event.get("type") == "message_update":
+                        telemetry_event_count += 1
+                        if telemetry_event_count > _PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT:
+                            raise BackendError(
+                                "OUTPUT_LIMIT_EXCEEDED",
+                                "Prime Agent RPC exceeded the telemetry event-count limit",
+                                audit_status="OUTPUT_LIMIT_TELEMETRY_EVENTS",
+                            )
+                    else:
+                        event_count += 1
+                        if event_count > _PRIME_RPC_EVENT_COUNT_LIMIT:
+                            raise BackendError(
+                                "OUTPUT_LIMIT_EXCEEDED",
+                                "Prime Agent RPC exceeded the semantic event-count limit",
+                                audit_status="OUTPUT_LIMIT_SEMANTIC_EVENTS",
+                            )
                     if event.get("type") == "response":
                         control_event_bytes += len(line)
                         if control_event_bytes > self.max_response_bytes:
                             raise BackendError(
                                 "OUTPUT_LIMIT_EXCEEDED",
                                 "Prime Agent RPC control events exceeded byte limit",
+                                audit_status="OUTPUT_LIMIT_CONTROL_BYTES",
                             )
                     if event.get("type") == "response" and event.get("id") == "thinkroom-provider":
                         if event.get("command") != "prompt" or event.get("success") is not True:
@@ -981,6 +998,7 @@ class PrimeAgentBackend:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent final message exceeded byte limit",
+                            audit_status="OUTPUT_LIMIT_FINAL_TEXT",
                         )
                     return parse_json_object(final_text)
 
@@ -1103,7 +1121,7 @@ class FailoverBackend:
             raise
         except BackendError as exc:
             if audit is not None and call_id is not None:
-                admitted = audit.finish(call_id, request, exc.code)
+                admitted = audit.finish(call_id, request, exc.audit_status)
                 self._record(
                     request,
                     route,

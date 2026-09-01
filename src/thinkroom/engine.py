@@ -142,7 +142,7 @@ def normalize_provider_exception(exc: BaseException) -> Exception:
     if type(exc) is BackendError and type(exc.code) is str:
         message = _PROVIDER_ERROR_MESSAGES.get(exc.code)
         if message is not None:
-            return BackendError(exc.code, message)
+            return BackendError(exc.code, message, audit_status=exc.audit_status)
     return _ProviderBoundaryFailure()
 
 
@@ -522,20 +522,21 @@ class ResearchEngine:
             )
         except (ValidationError, BackendError) as exc:
             if isinstance(exc, BackendError):
-                oversized_schema_repair = (
-                    exc.code == "OUTPUT_LIMIT_EXCEEDED" and fork_repair_budget[0] == 0
-                )
-                if exc.code != "MALFORMED_PROVIDER_OUTPUT" and not oversized_schema_repair:
+                if exc.code not in {"MALFORMED_PROVIDER_OUTPUT", "OUTPUT_LIMIT_EXCEEDED"}:
                     raise
             # _phase already performed the one allowed provider regeneration.
             # Schema-invalid or unparsable fork output must not destroy the
             # whole job. If that invalid output consumed the repair budget, an
             # oversized repair is also contained by the deterministic fallback.
-            # Initial output limits and all other transport, deadline, and
-            # resource failures remain fatal.
+            # A bounded initial fork overflow is contained the same way; no
+            # additional provider call or cross-provider failover is attempted.
             fallback = ForkOutputV1(perspectives=pack.fallbacks(request.branch_count))
             perspectives = fallback.perspectives
-            warning = "provider fork invalid; deterministic fallback used"
+            warning = (
+                "provider fork exceeded output limit; deterministic fallback used"
+                if isinstance(exc, BackendError) and exc.code == "OUTPUT_LIMIT_EXCEEDED"
+                else "provider fork invalid; deterministic fallback used"
+            )
         else:
             perspectives, warning = await self._diverse_fork(
                 fork,
@@ -870,7 +871,11 @@ class ResearchEngine:
                 encoded = json.dumps(raw, ensure_ascii=False).encode()
                 output_size = len(encoded)
                 if output_size > self.settings.max_backend_response_bytes:
-                    raise BackendError("OUTPUT_LIMIT_EXCEEDED", "backend response too large")
+                    raise BackendError(
+                        "OUTPUT_LIMIT_EXCEEDED",
+                        "backend response too large",
+                        audit_status="OUTPUT_LIMIT_VALIDATED_RESPONSE",
+                    )
                 result = PHASE_MODELS[phase].model_validate(raw)
                 (
                     selected_backend,
@@ -935,12 +940,13 @@ class ResearchEngine:
                     call_settled,
                 ) = self._take_provider_identity(request)
                 final_call_id = route_call_id if route_call_id is not None else call_id
-                output_status, validation_feedback = safe_exception_details(
+                safe_status, validation_feedback = safe_exception_details(
                     exc,
                     default_code="invalid",
                     default_message="provider output invalid",
                     include_validation_message=True,
                 )
+                output_status = exc.audit_status if type(exc) is BackendError else safe_status
                 if final_call_id is not None and not call_settled:
                     self.repo.finish_provider_call(
                         final_call_id,

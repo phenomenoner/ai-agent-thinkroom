@@ -174,10 +174,18 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
   context is bounded
   request data; the adapter SHALL NOT make a target
   repository the working directory or grant a repository write port.
-- Prime RPC input, argv, each LF-delimited event, event count, retained result/control bytes,
+- Prime RPC input, argv, each LF-delimited event, raw transport bytes, semantic event count,
+  discarded `message_update` telemetry event count, retained result/control bytes,
   terminal assistant text, timeout, and cleanup SHALL be bounded. Stderr SHALL be drained without
   retention and SHALL NOT participate in result validity; its task SHALL be cancelled after a valid
-  JSONL result. The production process wrapper SHALL retain same-group descendant custody until
+  JSONL result. A `message_update` remains untrusted and consumes both the telemetry-event ceiling
+  and the raw-transport ceiling, but SHALL NOT consume the lower semantic-event ceiling used for
+  lifecycle, tool, response, terminal, and unknown event types. Unknown types SHALL fail safely into
+  the semantic accounting class rather than being treated as discardable telemetry. Each output-limit
+  site SHALL retain the public backend code `OUTPUT_LIMIT_EXCEEDED` and SHALL attach one bounded,
+  non-secret audit status identifying the enforced ceiling. Process isolation and provider-call audit
+  SHALL preserve that status; terminal job/API/MCP errors SHALL continue to expose only the stable
+  public code and safe message. The production process wrapper SHALL retain same-group descendant custody until
   physical exit. Invalid JSONL, wrong child
   identity, missing or forged child-cleanup evidence, early parent output, failed turns, prompt
   rejection, timeout, cancellation, or premature
@@ -229,7 +237,7 @@ The installer validates the manifest syntax, the exact payload file set, and all
 - `CritiqueOutputV1`: agreements, contradictions, unsupported claims, blind spots, discriminating evidence, branch assessments.
 - `SynthesisOutputV1`: disposition, recommendation, rationale, ranked alternatives, evidence ledger, disagreements, uncertainties, falsifiers, next actions, source attempt and branch IDs.
 
-Fork normalization compares case-folded titles, hypotheses, and approaches. Duplicate perspectives are regenerated once; if diversity is still insufficient, deterministic domain-pack fallbacks fill the requested count and a provenance warning is recorded. A schema-invalid or unparsable fork is regenerated once, then uses the same deterministic fallback. If that one repair response exceeds the configured output limit, the deterministic fallback contains the already-invalid fork path without crossing providers; an output-limit failure on the initial fork remains fatal.
+Fork normalization compares case-folded titles, hypotheses, and approaches. Duplicate perspectives are regenerated once; if diversity is still insufficient, deterministic domain-pack fallbacks fill the requested count and a provenance warning is recorded. A schema-invalid or unparsable fork is regenerated once, then uses the same deterministic fallback. An output-limit failure on either the initial fork or its one allowed schema-repair response SHALL use the deterministic domain-pack perspectives, SHALL persist an explicit provenance warning, and SHALL NOT retry, cross providers, truncate output, or accept invalid JSON. Output-limit failures in framing, rollout, critique, and synthesis retain their existing fatal or branch-containment semantics.
 
 All schemas forbid unknown fields at provider boundaries and carry `schema_version = 1`. Non-empty text fields are 1–4,000 characters; summaries/recommendations are at most 12,000; evidence references are at most 2,048; ordinary collections contain 1–50 items and next-action lists contain 1–20. `EvidenceV1` contains a required ID matching `^[a-z][a-z0-9_-]{0,63}$`, statement, relationship (`supports` or `contradicts`), optional source label/reference, verification status, and verification basis. Evidence IDs are unique within one branch. `ClaimV1` contains statement and related evidence IDs, each of which must resolve within that branch. `BackendRequestV1.input` is a discriminated union for the named phase. Unknown enum values, fields, empty required collections, duplicate evidence IDs, over-limit text, cross-attempt IDs, or references to absent evidence fail validation. The OpenAPI document is the normative external schema; these phase schemas are normative internal backend contracts.
 
@@ -371,6 +379,10 @@ The built distribution contains all three skills. In an isolated skill root, ins
 ### AC-010 — production limits and ownership
 
 A second service instance cannot acquire worker ownership; readiness/public bind/resource-limit tests fail closed with the specified state or error. Attempt recovery never mixes artifacts, and provenance identifies every branch consumed by synthesis.
+
+### AC-011 — Prime RPC output-limit discrimination and containment
+
+Given a valid Prime RPC lifecycle with more discardable `message_update` events than the semantic-event ceiling, the phase succeeds while remaining below the separate telemetry and raw-byte ceilings. Exceeding the semantic-event, telemetry-event, raw-byte, per-event, control-byte, or terminal-text ceiling fails with public code `OUTPUT_LIMIT_EXCEEDED`, preserves the corresponding safe audit status through process isolation and physical provider-call settlement, and never makes that code eligible for provider failover. An initial fork output-limit failure completes with deterministic perspectives and an output-limit-specific provenance warning; the same failure in framing remains terminal.
 
 ### Required gates
 

@@ -245,7 +245,9 @@ class InitialOutputLimitForkBackend(ScriptedBackend):
         if request.phase == "fork":
             self.fork_calls += 1
             raise BackendError(
-                "OUTPUT_LIMIT_EXCEEDED", "initial fork response exceeded configured limit"
+                "OUTPUT_LIMIT_EXCEEDED",
+                "initial fork response exceeded configured limit",
+                audit_status="OUTPUT_LIMIT_FINAL_TEXT",
             )
         return await super().invoke(request)
 
@@ -639,7 +641,9 @@ async def test_schema_invalid_fork_then_oversized_repair_uses_deterministic_fall
         assert row and row["state"] == "succeeded"
         artifacts = repo.get_artifacts(job, row["attempt_id"])
         fork = json.loads(next(a["payload"] for a in artifacts if a["kind"] == "fork"))
-        assert fork["provenance_warning"] == "provider fork invalid; deterministic fallback used"
+        assert fork["provenance_warning"] == (
+            "provider fork exceeded output limit; deterministic fallback used"
+        )
         assert len({p["id"] for p in fork["perspectives"]}) == 2
         assert backend.fork_calls == 2
     finally:
@@ -648,7 +652,7 @@ async def test_schema_invalid_fork_then_oversized_repair_uses_deterministic_fall
 
 
 @pytest.mark.asyncio
-async def test_initial_fork_output_limit_remains_fatal(tmp_path):
+async def test_initial_fork_output_limit_uses_deterministic_fallback(tmp_path):
     repo = SQLiteRepository(str(tmp_path / "db.sqlite"))
     repo.open()
     backend = InitialOutputLimitForkBackend()
@@ -667,10 +671,18 @@ async def test_initial_fork_output_limit_remains_fatal(tmp_path):
                 break
             await asyncio.sleep(0.01)
         row = repo.get_job(job)
-        assert row and row["state"] == "failed"
-        assert json.loads(row["terminal_error"])["code"] == "OUTPUT_LIMIT_EXCEEDED"
-        assert not any(a["kind"] == "fork" for a in repo.get_artifacts(job, row["attempt_id"]))
+        assert row and row["state"] == "succeeded"
+        artifacts = repo.get_artifacts(job, row["attempt_id"])
+        fork = json.loads(next(a["payload"] for a in artifacts if a["kind"] == "fork"))
+        assert fork["provenance_warning"] == (
+            "provider fork exceeded output limit; deterministic fallback used"
+        )
+        assert len({p["id"] for p in fork["perspectives"]}) == 2
         assert backend.fork_calls == 1
+        statuses = repo._db().execute(
+            "SELECT output_status FROM provider_calls WHERE job_id=? ORDER BY id", (job,)
+        )
+        assert "OUTPUT_LIMIT_FINAL_TEXT" in {item["output_status"] for item in statuses.fetchall()}
     finally:
         await engine.stop()
         repo.close()
@@ -2484,6 +2496,7 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
         )
 
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert caught.value.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
     assert "raw transport" in str(caught.value)
 
 
@@ -2503,7 +2516,8 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
         "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
         "'success': True}), flush=True)\n"
         "for _ in range(int(os.environ['UPDATES'])):\n"
-        "    print(json.dumps({'type': 'message_update', 'delta': 'x'}), flush=True)\n"
+        "    print(json.dumps({'type': os.environ.get('EVENT_TYPE', 'message_update'), "
+        "'delta': 'x'}), flush=True)\n"
         "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
         "'customType': 'agent_message', 'details': {'message': 'child done', "
         "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
@@ -2530,6 +2544,7 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
     monkeypatch.setenv("PID_FILE", str(pid_file))
     monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1_000_000)
     monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 7)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT", 2)
     request = BackendRequestV1(
         phase="frame",
         job_id="j",
@@ -2553,13 +2568,31 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
     assert accepted["decision"] == "d"
 
     monkeypatch.setenv("UPDATES", "2")
+    accepted = await PrimeAgentBackend(
+        str(executable), "", "", "off", max_response_bytes=4096
+    ).invoke(request)
+    assert accepted["decision"] == "d"
+
+    monkeypatch.setenv("UPDATES", "3")
     with pytest.raises(BackendError) as caught:
         await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=4096).invoke(
             request
         )
 
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
-    assert "event-count" in str(caught.value)
+    assert caught.value.audit_status == "OUTPUT_LIMIT_TELEMETRY_EVENTS"
+    assert "telemetry event-count" in str(caught.value)
+
+    monkeypatch.setenv("EVENT_TYPE", "unknown_event")
+    monkeypatch.setenv("UPDATES", "2")
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=4096).invoke(
+            request
+        )
+
+    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert caught.value.audit_status == "OUTPUT_LIMIT_SEMANTIC_EVENTS"
+    assert "semantic event-count" in str(caught.value)
     pid = int(pid_file.read_text())
     for _ in range(100):
         if not Path(f"/proc/{pid}").exists():

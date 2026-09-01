@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 from .schemas import (
@@ -22,9 +23,13 @@ class ResearchRepository(Protocol):
 class BackendError(RuntimeError):
     """Core-owned typed provider-boundary error."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, audit_status: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        candidate = code if audit_status is None else audit_status
+        self.audit_status = (
+            candidate if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", candidate) else "invalid"
+        )
 
 
 class RolloutBackend(Protocol):

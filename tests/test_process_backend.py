@@ -15,6 +15,7 @@ import pytest
 from thinkroom.api import create_app
 from thinkroom.backends import PrimeAgentBackend, ScriptedBackend
 from thinkroom.config import Settings
+from thinkroom.ports import BackendError
 from thinkroom.process_backend import ProcessIsolatedBackend
 from thinkroom.schemas import BackendRequestV1, FrameInputV1, ResearchRequest
 from thinkroom.service import ThinkroomService
@@ -46,6 +47,18 @@ class ReturningGrandchildBackend:
         )
         Path(self.pid_path).write_text(str(process.pid), encoding="ascii")
         return {"status": "returned"}
+
+
+class OutputLimitBackend:
+    name = "output-limit"
+    model = "test-v1"
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        raise BackendError(
+            "OUTPUT_LIMIT_EXCEEDED",
+            "provider response exceeded byte limit",
+            audit_status="OUTPUT_LIMIT_FINAL_TEXT",
+        )
 
 
 class PausingCleanupBackend(ProcessIsolatedBackend):
@@ -88,6 +101,18 @@ async def test_process_isolated_backend_returns_valid_result() -> None:
     backend = ProcessIsolatedBackend(ScriptedBackend(), shutdown_grace_seconds=0.2)
     result = await backend.invoke(frame_request())
     assert result["decision"] == frame_request().input.question
+    assert backend.active_process_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_backend_preserves_safe_output_limit_audit_status() -> None:
+    backend = ProcessIsolatedBackend(OutputLimitBackend(), shutdown_grace_seconds=0.2)
+
+    with pytest.raises(BackendError) as caught:
+        await backend.invoke(frame_request())
+
+    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert caught.value.audit_status == "OUTPUT_LIMIT_FINAL_TEXT"
     assert backend.active_process_count == 0
 
 
