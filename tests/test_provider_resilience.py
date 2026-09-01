@@ -102,6 +102,33 @@ class PersistentAudit:
         return True
 
 
+class DurationAudit(PersistentAudit):
+    def __init__(self, durations: list[float]) -> None:
+        super().__init__()
+        self._durations: Iterator[float] = iter(durations)
+
+    def finish(
+        self,
+        call_id: int,
+        request: BackendRequestV1,
+        output_status: str,
+        output_size: int = 0,
+        *,
+        error_code: str | None = None,
+    ) -> bool:
+        admitted = super().finish(
+            call_id,
+            request,
+            output_status,
+            output_size,
+            error_code=error_code,
+        )
+        row = self.rows[call_id - 1]
+        ended = datetime.fromisoformat(row["ended_at"])
+        row["started_at"] = (ended - timedelta(seconds=next(self._durations))).isoformat()
+        return admitted
+
+
 def request(*, phase: str = "frame", branch_id: str | None = None) -> BackendRequestV1:
     assert phase == "frame"
     return BackendRequestV1(
@@ -165,6 +192,35 @@ async def test_fast_transient_retries_once_then_falls_back_with_three_call_cap()
 
     assert await backend.invoke_with_audit(request(), audit) == {"route": "fallback"}
     assert (primary.calls, fallback.calls, len(audit.rows)) == (2, 1, 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duration", "expected_primary_calls"),
+    [(29.999, 2), (30.0, 2), (30.001, 1)],
+)
+async def test_provider_error_retries_only_within_fast_transient_boundary(
+    duration: float, expected_primary_calls: int
+) -> None:
+    primary = SequenceBackend(
+        "primary",
+        "p",
+        [BackendError("PROVIDER_ERROR", "reset"), BackendError("PROVIDER_ERROR", "reset")],
+    )
+    fallback = SequenceBackend("fallback", "f", [{"route": "fallback"}])
+    audit = DurationAudit([duration, 0.0])
+    backend = FailoverBackend(
+        primary,
+        fallback,
+        primary_timeout_seconds=90,
+        fallback_timeout_seconds=180,
+        retry_delay_seconds=(0, 0),
+        fast_transient_seconds=30,
+    )
+
+    assert await backend.invoke_with_audit(request(), audit) == {"route": "fallback"}
+    assert primary.calls == expected_primary_calls
+    assert fallback.calls == 1
 
 
 @pytest.mark.asyncio
@@ -260,6 +316,7 @@ async def test_unclassified_primary_error_falls_back_once_without_retry() -> Non
 
     assert await backend.invoke_with_audit(request(), audit) == {"route": "fallback"}
     assert (primary.calls, fallback.calls) == (1, 1)
+    assert audit.rows[0]["error_code"] == "UNCLASSIFIED_ERROR"
 
 
 def test_v025_deadline_and_concurrency_defaults_are_bounded() -> None:

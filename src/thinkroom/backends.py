@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1062,6 +1063,11 @@ class FailoverBackend:
     )
     _MAX_PHYSICAL_CALLS = 3
 
+    @classmethod
+    def _normalized_error_code(cls, code: str) -> str:
+        known = cls._TERMINAL_CODES | cls._FALLBACK_CODES | {"MALFORMED_PROVIDER_OUTPUT"}
+        return code if code in known else "UNCLASSIFIED_ERROR"
+
     def __init__(
         self,
         primary: RolloutBackend,
@@ -1191,7 +1197,7 @@ class FailoverBackend:
                         call_id,
                         request,
                         exc.audit_status,
-                        error_code=exc.code,
+                        error_code=self._normalized_error_code(exc.code),
                     )
                 except TypeError:
                     admitted = audit.finish(call_id, request, exc.audit_status)
@@ -1226,6 +1232,17 @@ class FailoverBackend:
         except (KeyError, TypeError, IndexError):
             return getattr(row, key, None)
 
+    @classmethod
+    def _row_duration(cls, row: Any) -> float | None:
+        started = cls._row_value(row, "started_at")
+        ended = cls._row_value(row, "ended_at")
+        try:
+            return (
+                datetime.fromisoformat(str(ended)) - datetime.fromisoformat(str(started))
+            ).total_seconds()
+        except (TypeError, ValueError):
+            return None
+
     def _circuit_score(self, rows: list[Any]) -> int:
         score = 0
         for row in rows:
@@ -1235,15 +1252,8 @@ class FailoverBackend:
             if code == "BACKEND_TIMEOUT":
                 score += 2
             elif code == "PROVIDER_ERROR":
-                started = self._row_value(row, "started_at")
-                ended = self._row_value(row, "ended_at")
-                try:
-                    duration = (
-                        datetime.fromisoformat(str(ended)) - datetime.fromisoformat(str(started))
-                    ).total_seconds()
-                except (TypeError, ValueError):
-                    continue
-                if duration <= self.fast_transient_seconds:
+                duration = self._row_duration(row)
+                if duration is not None and duration <= self.fast_transient_seconds:
                     score += 1
         return score
 
@@ -1306,13 +1316,23 @@ class FailoverBackend:
             return await call_fallback()
 
         calls_used += 1
+        primary_started = time.monotonic()
         try:
             return await call_primary()
         except BackendError as exc:
+            primary_duration = max(0.0, time.monotonic() - primary_started)
+            current_rows = self._audit_rows(audit, "history", request)
+            if current_rows:
+                audited_duration = self._row_duration(current_rows[-1])
+                if audited_duration is not None:
+                    primary_duration = audited_duration
             primary_error_code = exc.code
             if exc.code in self._TERMINAL_CODES or exc.code == "MALFORMED_PROVIDER_OUTPUT":
                 raise
-            if exc.code in self._TRANSIENT_CODES and calls_used < self._MAX_PHYSICAL_CALLS:
+            retryable = exc.code == "RATE_LIMITED" or (
+                exc.code == "PROVIDER_ERROR" and primary_duration <= self.fast_transient_seconds
+            )
+            if retryable and calls_used < self._MAX_PHYSICAL_CALLS:
                 await asyncio.sleep(random.uniform(*self.retry_delay_seconds))
                 calls_used += 1
                 try:
