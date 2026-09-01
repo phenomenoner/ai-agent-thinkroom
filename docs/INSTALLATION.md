@@ -39,8 +39,10 @@ export THINKROOM_BACKEND=prime_agent
 export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
 export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
 export THINKROOM_MAX_CONCURRENCY=1
-export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
-export THINKROOM_JOB_TIMEOUT_SECONDS=3600
+export THINKROOM_ROLLOUT_PROVIDER_CONCURRENCY=1
+export THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=180
+export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 ```
 
 Prime Agent owns provider authentication and refreshes its own credentials. Thinkroom does not copy provider tokens. The v0.2 RLM path was exercised with Prime Agent 0.8.1. Other versions require the focused adapter suite and a real-provider smoke; Prime Agent 0.8.0 is not a release-supported RLM baseline.

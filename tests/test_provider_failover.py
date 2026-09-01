@@ -139,7 +139,8 @@ async def test_failover_backend_uses_fallback_only_for_provider_availability(cod
     assert await backend.invoke(request) == {"route": "fallback"}
     identity = backend.take_invocation_identity(request)
 
-    assert (primary.calls, fallback.calls) == (1, 1)
+    expected_primary_calls = 2 if code == "PROVIDER_ERROR" else 1
+    assert (primary.calls, fallback.calls) == (expected_primary_calls, 1)
     assert identity.backend == "prime:openai-codex"
     assert identity.model == "gpt-5.6-terra"
     assert identity.used_fallback
@@ -248,7 +249,7 @@ async def test_failover_backend_preserves_fallback_failure_and_chain_identity() 
         await backend.invoke(request)
 
     identity = backend.take_invocation_identity(request)
-    assert (primary.calls, fallback.calls) == (1, 1)
+    assert (primary.calls, fallback.calls) == (2, 1)
     assert identity.backend == "prime:openai-codex"
     assert identity.model == "terra"
     assert identity.used_fallback
@@ -304,13 +305,16 @@ async def test_engine_persists_ordered_physical_fallback_calls_without_a_schema_
         frame_calls = [call for call in calls if call["phase"] == "frame"]
         assert [call["backend"] for call in frame_calls] == [
             "prime:openrouter",
+            "prime:openrouter",
             "prime:openai-codex",
         ]
         assert [call["model"] for call in frame_calls] == [
             "z-ai/glm-5.3-flash",
+            "z-ai/glm-5.3-flash",
             "gpt-5.6-terra",
         ]
         assert [call["output_status"] for call in frame_calls] == [
+            "PROVIDER_ERROR",
             "PROVIDER_ERROR",
             "validated",
         ]
@@ -369,6 +373,8 @@ async def test_engine_cancellation_closes_started_call_without_invoking_fallback
 def test_failover_configuration_reserves_time_for_the_fallback() -> None:
     settings = Settings(
         backend="prime_agent_failover",
+        job_soft_timeout_seconds=900,
+        job_timeout_seconds=1800,
         backend_timeout_seconds=600,
         failover_primary_timeout_seconds=300,
     )
@@ -376,6 +382,8 @@ def test_failover_configuration_reserves_time_for_the_fallback() -> None:
     with pytest.raises(ValueError, match="reserve time"):
         Settings(
             backend="prime_agent_failover",
+            job_soft_timeout_seconds=900,
+            job_timeout_seconds=1800,
             backend_timeout_seconds=600,
             failover_primary_timeout_seconds=600,
         ).validate()

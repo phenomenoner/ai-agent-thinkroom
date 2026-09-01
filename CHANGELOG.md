@@ -4,6 +4,28 @@ All notable changes to Thinkroom are documented here.
 
 ## Unreleased
 
+## 0.2.5 — 2026-09-01
+
+### Added
+
+- Research detail responses now expose snapshot-labelled, derived provider progress with phase,
+  route, elapsed time, timeout remaining, call-budget use, an evidence watermark, and explicit
+  active, slow, degraded, stalled, and presumed-dead classifications.
+- Jobs preserve a typed partial-evidence artifact when the soft deadline prevents queued phases or
+  rollout branches from starting. Partial evidence is explicitly not a completed synthesis.
+
+### Changed
+
+- Provider availability handling now shares a hard three-call budget across one fast same-route
+  retry, one fallback, and one route-preserving schema repair. Timeouts skip same-route retry;
+  output-limit failures remain terminal and never amplify across providers.
+- A persisted, attempt-local circuit skips new primary calls after one primary timeout or two fast
+  transient failures. HTTP 429 is retried within the call budget but does not open the circuit.
+- Independent rollout-call concurrency is configurable from one through two and remains one by
+  default. Non-rollout phases and the default active-job limit remain one.
+- Existing canonical v0.2.4 SQLite databases are migrated in place with route role, effective
+  timeout, and normalized error-code evidence needed for recovery-correct progress and routing.
+
 ## 0.2.4 — 2026-09-01
 
 ### Fixed

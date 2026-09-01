@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -242,9 +243,8 @@ class OpenAIBackend:
                 },
             ) as response:
                 if response.status_code >= 400:
-                    raise BackendError(
-                        "PROVIDER_ERROR", f"provider returned HTTP {response.status_code}"
-                    )
+                    code = "RATE_LIMITED" if response.status_code == 429 else "PROVIDER_ERROR"
+                    raise BackendError(code, f"provider returned HTTP {response.status_code}")
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in response.aiter_bytes():
@@ -1039,13 +1039,55 @@ class BackendInvocationIdentity:
 
 
 class FailoverBackend:
-    """Try one physical backend, then one bounded availability fallback."""
+    """Enforce one durable, route-aware physical-call budget."""
 
-    _FALLBACK_CODES = frozenset({"PROVIDER_ERROR", "BACKEND_TIMEOUT"})
+    _TRANSIENT_CODES = frozenset({"PROVIDER_ERROR", "RATE_LIMITED"})
+    _FALLBACK_CODES = frozenset(
+        {"PROVIDER_ERROR", "RATE_LIMITED", "BACKEND_TIMEOUT", "UNCLASSIFIED_ERROR"}
+    )
+    _TERMINAL_CODES = frozenset(
+        {
+            "OUTPUT_LIMIT_EXCEEDED",
+            "DEADLINE_EXCEEDED",
+            "DEADLINE_INSUFFICIENT",
+            "SOFT_DEADLINE_REACHED",
+            "CALL_BUDGET_EXHAUSTED",
+            "STALE_ATTEMPT",
+            "CANCELLED",
+            "CONTEXT_LIMIT_EXCEEDED",
+            "INVALID_REQUEST",
+            "UNSUPPORTED_PHASE",
+            "PROVIDER_AUDIT_ERROR",
+        }
+    )
+    _MAX_PHYSICAL_CALLS = 3
 
-    def __init__(self, primary: RolloutBackend, fallback: RolloutBackend) -> None:
+    def __init__(
+        self,
+        primary: RolloutBackend,
+        fallback: RolloutBackend,
+        *,
+        primary_timeout_seconds: float = 90,
+        fallback_timeout_seconds: float = 180,
+        retry_delay_seconds: tuple[float, float] = (1, 3),
+        fast_transient_seconds: float = 30,
+    ) -> None:
+        if primary_timeout_seconds <= 0 or fallback_timeout_seconds <= 0:
+            raise ValueError("failover route timeouts must be positive")
+        if (
+            len(retry_delay_seconds) != 2
+            or retry_delay_seconds[0] < 0
+            or retry_delay_seconds[1] < retry_delay_seconds[0]
+        ):
+            raise ValueError("retry delay range is invalid")
+        if fast_transient_seconds <= 0:
+            raise ValueError("fast transient threshold must be positive")
         self.primary = primary
         self.fallback = fallback
+        self.primary_timeout_seconds = primary_timeout_seconds
+        self.fallback_timeout_seconds = fallback_timeout_seconds
+        self.retry_delay_seconds = retry_delay_seconds
+        self.fast_transient_seconds = fast_transient_seconds
         self.name = self._join_identity(primary.name, fallback.name, "backend")
         self.model = self._join_identity(primary.model, fallback.model, "model")
         self._identities: dict[tuple[str, str, str | None, str], BackendInvocationIdentity] = {}
@@ -1094,10 +1136,30 @@ class FailoverBackend:
         request: BackendRequestV1,
         audit: ProviderInvocationAudit | None,
         *,
+        route_role: str,
+        effective_timeout_seconds: float,
         used_fallback: bool,
         primary_error_code: str | None = None,
     ) -> dict[str, Any]:
-        call_id = audit.start(request, route.name, route.model) if audit is not None else None
+        remaining = (request.deadline - datetime.now(UTC)).total_seconds()
+        if remaining < effective_timeout_seconds:
+            raise BackendError(
+                "DEADLINE_INSUFFICIENT",
+                "remaining deadline cannot cover the configured route timeout",
+            )
+        call_id: int | None = None
+        if audit is not None:
+            try:
+                call_id = audit.start(
+                    request,
+                    route.name,
+                    route.model,
+                    route_role=route_role,
+                    effective_timeout_seconds=effective_timeout_seconds,
+                )
+            except TypeError:
+                # Compatibility for third-party audit adapters written before v0.2.5.
+                call_id = audit.start(request, route.name, route.model)
         self._record(
             request,
             route,
@@ -1109,7 +1171,10 @@ class FailoverBackend:
             return await route.invoke(request)
         except asyncio.CancelledError:
             if audit is not None and call_id is not None:
-                admitted = audit.finish(call_id, request, "cancelled")
+                try:
+                    admitted = audit.finish(call_id, request, "cancelled", error_code="CANCELLED")
+                except TypeError:
+                    admitted = audit.finish(call_id, request, "cancelled")
                 self._record(
                     request,
                     route,
@@ -1121,7 +1186,15 @@ class FailoverBackend:
             raise
         except BackendError as exc:
             if audit is not None and call_id is not None:
-                admitted = audit.finish(call_id, request, exc.audit_status)
+                try:
+                    admitted = audit.finish(
+                        call_id,
+                        request,
+                        exc.audit_status,
+                        error_code=exc.code,
+                    )
+                except TypeError:
+                    admitted = audit.finish(call_id, request, exc.audit_status)
                 self._record(
                     request,
                     route,
@@ -1134,23 +1207,128 @@ class FailoverBackend:
                     raise BackendError("STALE_ATTEMPT", "attempt is no longer current") from None
             raise
 
+    @staticmethod
+    def _audit_rows(
+        audit: ProviderInvocationAudit | None,
+        method: str,
+        request: BackendRequestV1,
+    ) -> list[Any]:
+        reader = getattr(audit, method, None)
+        if not callable(reader):
+            return []
+        rows = reader(request)
+        return list(rows) if rows is not None else []
+
+    @staticmethod
+    def _row_value(row: Any, key: str) -> Any:
+        try:
+            return row[key]
+        except (KeyError, TypeError, IndexError):
+            return getattr(row, key, None)
+
+    def _circuit_score(self, rows: list[Any]) -> int:
+        score = 0
+        for row in rows:
+            if self._row_value(row, "route_role") != "primary":
+                continue
+            code = self._row_value(row, "error_code")
+            if code == "BACKEND_TIMEOUT":
+                score += 2
+            elif code == "PROVIDER_ERROR":
+                started = self._row_value(row, "started_at")
+                ended = self._row_value(row, "ended_at")
+                try:
+                    duration = (
+                        datetime.fromisoformat(str(ended)) - datetime.fromisoformat(str(started))
+                    ).total_seconds()
+                except (TypeError, ValueError):
+                    continue
+                if duration <= self.fast_transient_seconds:
+                    score += 1
+        return score
+
     async def _invoke(
         self, request: BackendRequestV1, audit: ProviderInvocationAudit | None
     ) -> dict[str, Any]:
-        try:
-            return await self._invoke_route(self.primary, request, audit, used_fallback=False)
-        except BackendError as exc:
-            if exc.code not in self._FALLBACK_CODES:
-                raise
-            if request.deadline <= datetime.now(UTC):
-                raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded") from None
+        phase_rows = self._audit_rows(audit, "history", request)
+        attempt_rows = self._audit_rows(audit, "attempt_history", request)
+        calls_used = len(phase_rows)
+        if calls_used >= self._MAX_PHYSICAL_CALLS:
+            raise BackendError("CALL_BUDGET_EXHAUSTED", "physical call budget exhausted")
+
+        last = phase_rows[-1] if phase_rows else None
+        if last is not None and self._row_value(last, "error_code") == "MALFORMED_PROVIDER_OUTPUT":
+            role = self._row_value(last, "route_role")
+            route = self.fallback if role == "fallback" else self.primary
+            timeout = (
+                self.fallback_timeout_seconds
+                if role == "fallback"
+                else self.primary_timeout_seconds
+            )
+            return await self._invoke_route(
+                route,
+                request,
+                audit,
+                route_role=str(role),
+                effective_timeout_seconds=timeout,
+                used_fallback=role == "fallback",
+            )
+
+        circuit_open = self._circuit_score(attempt_rows) >= 2
+        primary_error_code: str | None = None
+
+        async def call_primary() -> dict[str, Any]:
+            return await self._invoke_route(
+                self.primary,
+                request,
+                audit,
+                route_role="primary",
+                effective_timeout_seconds=self.primary_timeout_seconds,
+                used_fallback=False,
+            )
+
+        async def call_fallback() -> dict[str, Any]:
+            nonlocal calls_used
+            if calls_used >= self._MAX_PHYSICAL_CALLS:
+                raise BackendError("CALL_BUDGET_EXHAUSTED", "physical call budget exhausted")
+            calls_used += 1
             return await self._invoke_route(
                 self.fallback,
                 request,
                 audit,
+                route_role="fallback",
+                effective_timeout_seconds=self.fallback_timeout_seconds,
                 used_fallback=True,
-                primary_error_code=exc.code,
+                primary_error_code=primary_error_code,
             )
+
+        if circuit_open:
+            return await call_fallback()
+
+        calls_used += 1
+        try:
+            return await call_primary()
+        except BackendError as exc:
+            primary_error_code = exc.code
+            if exc.code in self._TERMINAL_CODES or exc.code == "MALFORMED_PROVIDER_OUTPUT":
+                raise
+            if exc.code in self._TRANSIENT_CODES and calls_used < self._MAX_PHYSICAL_CALLS:
+                await asyncio.sleep(random.uniform(*self.retry_delay_seconds))
+                calls_used += 1
+                try:
+                    return await call_primary()
+                except BackendError as retry_exc:
+                    primary_error_code = retry_exc.code
+                    if (
+                        retry_exc.code in self._TERMINAL_CODES
+                        or retry_exc.code == "MALFORMED_PROVIDER_OUTPUT"
+                    ):
+                        raise
+                    if retry_exc.code not in self._FALLBACK_CODES:
+                        primary_error_code = "UNCLASSIFIED_ERROR"
+            elif exc.code not in self._FALLBACK_CODES:
+                primary_error_code = "UNCLASSIFIED_ERROR"
+            return await call_fallback()
 
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
         return await self._invoke(request, None)

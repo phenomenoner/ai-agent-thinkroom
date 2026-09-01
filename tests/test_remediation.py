@@ -807,7 +807,7 @@ async def test_final_deadline_overrun_cannot_succeed(tmp_path):
     row = repo.get_job(job)
     assert row and row["state"] == "failed"
     terminal_error = json.loads(row["terminal_error"])
-    assert terminal_error["code"] == "DEADLINE_EXCEEDED"
+    assert terminal_error["code"] == "DEADLINE_INSUFFICIENT"
     await engine.stop()
     repo.close()
 
@@ -4899,7 +4899,7 @@ async def test_cancellation_settles_without_provider_cooperation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_deadline_settles_without_provider_cooperation(tmp_path):
+async def test_deadline_insufficient_avoids_noncooperative_provider_start(tmp_path):
     repo = SQLiteRepository(str(tmp_path / "deadline.sqlite"))
     repo.open()
     backend = IndefinitelyCancellationSuppressingBackend()
@@ -4913,12 +4913,13 @@ async def test_deadline_settles_without_provider_cooperation(tmp_path):
         )
     )
     try:
-        await asyncio.wait_for(backend.started.wait(), timeout=0.5)
         row = await _wait_terminal(repo, job, timeout=2)
         assert row["state"] == "failed"
         assert (
-            TerminalErrorV1.model_validate_json(row["terminal_error"]).code == "DEADLINE_EXCEEDED"
+            TerminalErrorV1.model_validate_json(row["terminal_error"]).code
+            == "DEADLINE_INSUFFICIENT"
         )
+        assert not backend.started.is_set()
         assert backend.release.is_set() is False
     finally:
         backend.release.set()
@@ -5143,10 +5144,10 @@ def test_normative_migration_policy_is_single_and_fail_closed():
     root = Path(__file__).parents[1]
     specification = (root / "docs/specification.md").read_text()
     operations = (root / "docs/OPERATIONS.md").read_text()
-    contract = "v0.1.0 creates the canonical schema only when the database is empty"
+    contract = "Only the exact canonical v0.2.4 provider-call schema may migrate to v0.2.5"
     assert contract in specification
     assert contract in operations
-    assert "Migrations are monotonic and run before readiness succeeds" not in specification
+    assert "Any other existing noncanonical or prerelease schema is rejected" in specification
 
 
 def _skills_tree_snapshot(root: Path) -> list[tuple[str, str, bytes | str | int]]:
@@ -5215,6 +5216,17 @@ _PROFILED_RECEIPTS = {
             "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
         },
     },
+    "0.2.4": {
+        "manifest_sha256": "7c7dad59be8856f9ad64801feca9c3f3df05e08fb273969523f48bba57c38722",
+        "files": {
+            "thinkroom-install/SKILL.md": "74d1900deb32dc4215a17d1b76270e34cd533221b55700523dbf54e1ccd6ae9c",
+            "thinkroom-install/agents/openai.yaml": "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2",
+            "thinkroom-operate/SKILL.md": "81ab08453ea30a919f7ed5c31229f9d7a4150ea12925566293591dd4c7249af5",
+            "thinkroom-operate/agents/openai.yaml": "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823",
+            "thinkroom-trigger/SKILL.md": "a1debe46591cb772b54e15dbf37637c7f46b1607c0d07fa542bc211d01e89a99",
+            "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
+        },
+    },
 }
 
 
@@ -5269,8 +5281,52 @@ def _seed_profiled_skills(target: Path, version: str) -> None:
     payloads = {
         entry["path"]: (bundle / entry["path"]).read_bytes() for entry in manifest["entries"]
     }
+    legacy_metadata = {
+        "thinkroom-install/SKILL.md": (
+            "version: 0.2.0\nauthor: CK, Martin (Hermes Agent)\nlicense: MIT\n"
+            "platforms: [linux]\ntags: [thinkroom, research, installation]"
+        ),
+        "thinkroom-trigger/SKILL.md": (
+            "version: 0.2.0\nauthor: CK, Martin (Hermes Agent)\nlicense: MIT\n"
+            "platforms: [linux]\ntags: [thinkroom, research, decision-support]"
+        ),
+        "thinkroom-operate/SKILL.md": (
+            f"version: {version}\nauthor: CK, Martin (Hermes Agent)\nlicense: MIT\n"
+            "platforms: [linux]\ntags: [thinkroom, research, operations]"
+        ),
+    }
+    current_metadata = {
+        "thinkroom-install/SKILL.md": (
+            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
+            '  tags: "thinkroom, research, installation"'
+        ),
+        "thinkroom-trigger/SKILL.md": (
+            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
+            '  tags: "thinkroom, research, decision-support"'
+        ),
+        "thinkroom-operate/SKILL.md": (
+            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
+            '  tags: "thinkroom, research, operations"'
+        ),
+    }
+    for relative in legacy_metadata:
+        text = payloads[relative].decode()
+        text = text.replace(current_metadata[relative], legacy_metadata[relative])
+        payloads[relative] = text.encode()
+    operate_addition = (
+        "Use the derived `progress` observation to distinguish active provider work, queued rollout work,\n"
+        "fallback/repair degradation, and a presumed-dead call. Its `observed_at` and\n"
+        "`evidence_watermark` fields make the observation boundary explicit; it is not transactionally\n"
+        "exact. Do not describe a live fallback call or work waiting behind a known call as stalled.\n\n"
+        "A succeeded job can have `completion_status: partial` when its soft deadline prevents more phases\n"
+        "from starting. Preserve the `partial` artifact and branch failures, but do not present it as a\n"
+        "completed synthesis or as evidence that every requested perspective ran.\n\n"
+    )
     payloads["thinkroom-operate/SKILL.md"] = payloads["thinkroom-operate/SKILL.md"].replace(
-        b"version: 0.2.4", f"version: {version}".encode()
+        operate_addition.encode(), b""
     )
     expected_files = historical["files"]
     assert {
@@ -5326,21 +5382,23 @@ def test_skills_known_crlf_preprofile_receipt_migrates_to_lf_bundle(tmp_path):
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
 
 
-@pytest.mark.parametrize("version", ["0.2.1", "0.2.2", "0.2.3"])
+@pytest.mark.parametrize("version", ["0.2.1", "0.2.2", "0.2.3", "0.2.4"])
 def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     target = tmp_path / "skills"
     _seed_profiled_skills(target, version)
 
     planned = plan(target)
     classifications = {item["path"]: item["classification"] for item in planned}
-    assert classifications["thinkroom-operate/SKILL.md"] == "UPDATE"
-    assert {
-        state for path, state in classifications.items() if path != "thinkroom-operate/SKILL.md"
-    } == {"EXACT"}
+    assert {state for path, state in classifications.items() if path.endswith("SKILL.md")} == {
+        "UPDATE"
+    }
+    assert {state for path, state in classifications.items() if path.endswith("openai.yaml")} == {
+        "EXACT"
+    }
     assert install(target) == planned
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
     receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
-    assert receipt["bundle_version"] == "0.2.4"
+    assert receipt["bundle_version"] == "0.2.5"
     assert len(receipt["files"]) == 6
 
 
@@ -5360,8 +5418,10 @@ def test_skills_known_profiled_receipt_tamper_blocks_without_mutation(version, o
         }
         assert classifications["thinkroom-operate/SKILL.md"] == "DIVERGED"
         assert {
-            state for path, state in classifications.items() if path != "thinkroom-operate/SKILL.md"
+            state for path, state in classifications.items() if path.endswith("openai.yaml")
         } == {"EXACT"}
+        assert classifications["thinkroom-install/SKILL.md"] == "UPDATE"
+        assert classifications["thinkroom-trigger/SKILL.md"] == "UPDATE"
     else:
         with pytest.raises(ValueError, match="DIVERGED"):
             getattr(skill_module, operation)(target)
@@ -6016,7 +6076,7 @@ async def test_global_405_and_413_actual_responses_match_openapi(tmp_path):
 def test_bundled_skills_claim_only_the_native_secure_platform():
     root = Path(__file__).parents[1] / "src/thinkroom/bundled_skills"
     for skill in root.glob("*/SKILL.md"):
-        assert "platforms: [linux]" in skill.read_text()
+        assert 'platforms: "linux"' in skill.read_text()
 
 
 def test_embedded_sdk_returns_the_durable_research_detail_shape(tmp_path):

@@ -10,9 +10,11 @@ from urllib.parse import urlparse
 class Settings:
     database_url: str = "sqlite+aiosqlite:///.data/thinkroom.db"
     backend: str = "scripted"
-    max_concurrency: int = 3
+    max_concurrency: int = 1
+    rollout_provider_concurrency: int = 1
     max_queued_jobs: int = 100
-    job_timeout_seconds: int = 900
+    job_soft_timeout_seconds: int = 900
+    job_timeout_seconds: int = 1200
     backend_timeout_seconds: int = 180
     max_job_attempts: int = 2
     max_backend_response_bytes: int = 1_000_000
@@ -35,7 +37,9 @@ class Settings:
         vals.update(overrides)
         for n in (
             "max_concurrency",
+            "rollout_provider_concurrency",
             "max_queued_jobs",
+            "job_soft_timeout_seconds",
             "job_timeout_seconds",
             "backend_timeout_seconds",
             "max_job_attempts",
@@ -66,7 +70,9 @@ class Settings:
             raise ValueError("only SQLite database URLs are supported")
         bounds = {
             "max_concurrency": (1, 12),
+            "rollout_provider_concurrency": (1, 2),
             "max_queued_jobs": (1, 10000),
+            "job_soft_timeout_seconds": (30, 7199),
             "job_timeout_seconds": (30, 7200),
             "backend_timeout_seconds": (10, 1800),
             "max_job_attempts": (1, 5),
@@ -89,6 +95,11 @@ class Settings:
             and self.failover_primary_timeout_seconds >= self.backend_timeout_seconds
         ):
             raise ValueError("failover primary timeout must reserve time for the fallback")
+        reserve = self.backend_timeout_seconds
+        if self.backend == "prime_agent_failover":
+            reserve += self.failover_primary_timeout_seconds
+        if self.job_soft_timeout_seconds + reserve > self.job_timeout_seconds:
+            raise ValueError("soft timeout must reserve one fallback timeout before job timeout")
         try:
             bind_address = ip_address(self.host)
         except ValueError as exc:

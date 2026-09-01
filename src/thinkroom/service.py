@@ -19,8 +19,9 @@ from .config import Settings
 from .engine import ResearchEngine
 from .ports import RolloutBackend
 from .process_backend import ProcessIsolatedBackend
+from .progress import derive_research_progress
 from .repository import SQLiteRepository
-from .schemas import ResearchDetail
+from .schemas import ResearchDetail, ResearchRequest
 
 log = logging.getLogger("thinkroom.service")
 _DATABASE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
@@ -344,6 +345,9 @@ class ThinkroomService:
             "terminal_error": json.loads(row["terminal_error"]) if row["terminal_error"] else None,
             "attempts": [dict(attempt) for attempt in self.repo.attempts(job_id)],
             "transitions": [dict(transition) for transition in self.repo.transitions(job_id)],
+            "completion_status": None,
+            "partial": None,
+            "progress": None,
         }
         artifacts = self.repo.get_artifacts(job_id, row["attempt_id"]) if row["attempt_id"] else []
         for artifact in artifacts:
@@ -366,6 +370,20 @@ class ThinkroomService:
                 detail["critique_id"] = f"critique-{artifact['id']}"
             elif artifact["kind"] == "synthesis":
                 detail["synthesis"] = payload
+                detail["completion_status"] = "complete"
+            elif artifact["kind"] == "partial":
+                detail["partial"] = payload
+                detail["completion_status"] = "partial"
+        request = ResearchRequest.model_validate(detail["request"])
+        detail["progress"] = derive_research_progress(
+            row,
+            branch_count=request.branch_count,
+            provider_calls=self.repo.provider_calls(job_id, row["attempt_id"])
+            if row["attempt_id"]
+            else [],
+            artifacts=artifacts,
+            transitions=self.repo.transitions(job_id),
+        )
         return ResearchDetail.model_validate(detail)
 
     def _selected_backend(self) -> RolloutBackend:
@@ -398,6 +416,8 @@ class ThinkroomService:
         return FailoverBackend(
             ProcessIsolatedBackend(primary),
             ProcessIsolatedBackend(fallback),
+            primary_timeout_seconds=self.settings.failover_primary_timeout_seconds,
+            fallback_timeout_seconds=self.settings.backend_timeout_seconds,
         )
 
     async def start(self) -> None:

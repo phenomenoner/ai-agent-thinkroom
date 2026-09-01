@@ -44,6 +44,27 @@ class JobState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ProgressClassification(StrEnum):
+    PRESUMED_DEAD = "PRESUMED_DEAD"
+    STALLED = "STALLED"
+    DEGRADED = "DEGRADED"
+    SLOW = "SLOW"
+    ACTIVE = "ACTIVE"
+    SETTLING = "SETTLING"
+    TERMINAL = "TERMINAL"
+
+
+class ProgressSubstate(StrEnum):
+    WAITING_FOR_SLOT = "WAITING_FOR_SLOT"
+    PRIMARY_ACTIVE = "PRIMARY_ACTIVE"
+    PRIMARY_TIMEOUT = "PRIMARY_TIMEOUT"
+    FALLBACK_ACTIVE = "FALLBACK_ACTIVE"
+    SCHEMA_REPAIR_ACTIVE = "SCHEMA_REPAIR_ACTIVE"
+    PRIMARY_CIRCUIT_OPEN = "PRIMARY_CIRCUIT_OPEN"
+    PRESUMED_DEAD = "PRESUMED_DEAD"
+    SETTLING = "SETTLING"
+
+
 class EvidenceV1(StrictModel):
     schema_version: Literal[1] = 1
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
@@ -349,6 +370,45 @@ class AttemptRecordV1(StrictModel):
     model: str = Field(min_length=1, max_length=256)
 
 
+class PhaseProgressV1(StrictModel):
+    phase: Phase
+    branch_id: BoundedId | None = None
+    substate: ProgressSubstate
+    route: Literal["primary", "fallback", "single"] | None = None
+    backend: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=256)
+    elapsed_seconds: float | None = Field(default=None, ge=0)
+    timeout_remaining_seconds: float | None = None
+    calls_used: int = Field(ge=0, le=3)
+    budget_remaining: int = Field(ge=0, le=3)
+
+
+class ResearchProgressV1(StrictModel):
+    observed_at: datetime
+    evidence_watermark: int = Field(ge=0)
+    derived: Literal[True] = True
+    as_of: datetime
+    classification: ProgressClassification
+    substate: ProgressSubstate
+    planned: int = Field(ge=0)
+    active: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    queued: int = Field(ge=0)
+    last_progress_at: datetime
+    phases: list[PhaseProgressV1] = Field(default_factory=list)
+
+
+class PartialResearchV1(StrictModel):
+    schema_version: Literal[1] = 1
+    reason: Literal["SOFT_DEADLINE_REACHED"]
+    generated_at: datetime
+    successful_branch_ids: list[BoundedId] = Field(default_factory=list, max_length=6)
+    failed_branch_ids: list[BoundedId] = Field(default_factory=list, max_length=6)
+    skipped_branch_ids: list[BoundedId] = Field(default_factory=list, max_length=6)
+    skipped_phases: list[Phase] = Field(default_factory=list, max_length=5)
+
+
 class ResearchDetail(StrictModel):
     job_id: str
     state: JobState
@@ -366,3 +426,6 @@ class ResearchDetail(StrictModel):
     terminal_error: TerminalErrorV1 | None = None
     attempts: list[AttemptRecordV1] = Field(default_factory=list)
     transitions: list[TransitionRecordV1] = Field(default_factory=list)
+    completion_status: Literal["complete", "partial"] | None = None
+    partial: PartialResearchV1 | None = None
+    progress: ResearchProgressV1 | None = None

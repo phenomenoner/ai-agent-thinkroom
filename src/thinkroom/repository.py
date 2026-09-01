@@ -38,18 +38,21 @@ _ALLOWED: dict[str, set[str]] = {
     },
     JobState.FRAMING.value: {
         JobState.ROLLING_OUT.value,
+        JobState.SUCCEEDED.value,
         JobState.FAILED.value,
         JobState.CANCELLED.value,
         JobState.QUEUED.value,
     },
     JobState.ROLLING_OUT.value: {
         JobState.CRITIQUING.value,
+        JobState.SUCCEEDED.value,
         JobState.FAILED.value,
         JobState.CANCELLED.value,
         JobState.QUEUED.value,
     },
     JobState.CRITIQUING.value: {
         JobState.SYNTHESIZING.value,
+        JobState.SUCCEEDED.value,
         JobState.FAILED.value,
         JobState.CANCELLED.value,
         JobState.QUEUED.value,
@@ -62,7 +65,7 @@ _ALLOWED: dict[str, set[str]] = {
     },
 }
 
-_SCHEMA_SQL = """
+_SCHEMA_SQL_V024 = """
 CREATE TABLE IF NOT EXISTS research_jobs (job_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deadline TEXT NOT NULL, cancellation_requested INTEGER NOT NULL DEFAULT 0, terminal_error TEXT, attempt_id TEXT, attempt_number INTEGER);
 CREATE TABLE IF NOT EXISTS attempts (attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, number INTEGER NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT, recovery_reason TEXT, backend TEXT, model TEXT);
 CREATE TABLE IF NOT EXISTS state_transitions (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, attempt_id TEXT, from_state TEXT, to_state TEXT NOT NULL, at TEXT NOT NULL, reason TEXT, correlation_id TEXT);
@@ -72,6 +75,11 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (key TEXT PRIMARY KEY, request_hash 
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON research_jobs(created_at DESC, job_id DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON research_jobs(state, created_at);
 """
+_SCHEMA_SQL = _SCHEMA_SQL_V024.replace(
+    "output_status TEXT, output_size INTEGER)",
+    "output_status TEXT, output_size INTEGER, route_role TEXT, "
+    "effective_timeout_seconds REAL, error_code TEXT)",
+)
 _MANAGED_TABLES = (
     "research_jobs",
     "attempts",
@@ -149,7 +157,7 @@ class SQLiteRepository:
                     ).fetchone()
                     if has_schema is None:
                         raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
-                    self._attest_schema(copy)
+                    self._attest_schema(copy, allow_legacy=True)
                 finally:
                     copy.close()
             except (OSError, sqlite3.Error) as exc:
@@ -191,7 +199,14 @@ class SQLiteRepository:
                 "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone()
             if existing is not None:
-                self._attest_schema(db)
+                schema = self._attest_schema(db, allow_legacy=True)
+                if schema == "v0.2.4":
+                    db.execute("ALTER TABLE provider_calls ADD COLUMN route_role TEXT")
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN effective_timeout_seconds REAL"
+                    )
+                    db.execute("ALTER TABLE provider_calls ADD COLUMN error_code TEXT")
+                    self._attest_schema(db)
                 return
             db.executescript(_SCHEMA_SQL)
             self._attest_schema(db)
@@ -269,14 +284,26 @@ class SQLiteRepository:
         }
 
     @classmethod
-    def _attest_schema(cls, db: sqlite3.Connection) -> None:
-        expected = sqlite3.connect(":memory:")
-        try:
-            expected.executescript(_SCHEMA_SQL)
-            expected_shape = cls._schema_shape(expected)
-        finally:
-            expected.close()
+    def _attest_schema(cls, db: sqlite3.Connection, *, allow_legacy: bool = False) -> str:
         actual_shape = cls._schema_shape(db)
+        candidates = [("v0.2.5", _SCHEMA_SQL)]
+        if allow_legacy:
+            candidates.append(("v0.2.4", _SCHEMA_SQL_V024))
+        for version, schema_sql in candidates:
+            expected = sqlite3.connect(":memory:")
+            try:
+                expected.executescript(schema_sql)
+                expected_shape = cls._schema_shape(expected)
+            finally:
+                expected.close()
+            if cls._schema_shapes_match(actual_shape, expected_shape):
+                return version
+        raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+
+    @classmethod
+    def _schema_shapes_match(
+        cls, actual_shape: dict[str, object], expected_shape: dict[str, object]
+    ) -> bool:
         actual_tables = actual_shape["tables"]
         expected_tables = expected_shape["tables"]
         assert isinstance(actual_tables, dict) and isinstance(expected_tables, dict)
@@ -289,15 +316,16 @@ class SQLiteRepository:
                     for name, affinity, required, default, primary in actual_rows
                 ]
             if actual_rows != expected_rows:
-                raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+                return False
         if actual_shape["indexes"] != expected_shape["indexes"]:
-            raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+            return False
         if actual_shape["table_sql"] != expected_shape["table_sql"]:
-            raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+            return False
         if actual_shape["all_objects"] != expected_shape["all_objects"]:
-            raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+            return False
         if actual_shape["dangerous_objects"]:
-            raise RuntimeError("DATABASE_SCHEMA_MISMATCH")
+            return False
+        return True
 
     def cleanup_retention(self, retention_days: int, limit: int = 100) -> int:
         db = self._db()
@@ -510,7 +538,7 @@ class SQLiteRepository:
             "SELECT COALESCE(SUM(length(CAST(attempt_id AS BLOB)) + length(CAST(job_id AS BLOB)) + length(CAST(state AS BLOB)) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(outcome AS BLOB)),0) + COALESCE(length(CAST(recovery_reason AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + 8),0) n FROM attempts WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + COALESCE(length(CAST(attempt_id AS BLOB)),0) + COALESCE(length(CAST(from_state AS BLOB)),0) + length(CAST(to_state AS BLOB)) + length(CAST(at AS BLOB)) + COALESCE(length(CAST(reason AS BLOB)),0) + COALESCE(length(CAST(correlation_id AS BLOB)),0) + 8),0) n FROM state_transitions WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(kind AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + length(CAST(payload AS BLOB)) + COALESCE(length(CAST(state AS BLOB)),0) + COALESCE(length(CAST(error AS BLOB)),0) + 8),0) n FROM artifacts WHERE job_id=?",
-            "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(phase AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + COALESCE(length(CAST(prompt_version AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(output_status AS BLOB)),0) + 24),0) n FROM provider_calls WHERE job_id=?",
+            "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(phase AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + COALESCE(length(CAST(prompt_version AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(output_status AS BLOB)),0) + COALESCE(length(CAST(route_role AS BLOB)),0) + COALESCE(length(CAST(error_code AS BLOB)),0) + 32),0) n FROM provider_calls WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(CAST(request_hash AS BLOB)) + length(CAST(job_id AS BLOB))),0) n FROM idempotency_keys WHERE job_id=?",
         )
         return int(row["job_bytes"] or 0) + sum(
@@ -969,6 +997,17 @@ class SQLiteRepository:
             ).fetchall()
         return db.execute(
             "SELECT * FROM artifacts WHERE job_id=? ORDER BY id", (job_id,)
+        ).fetchall()
+
+    def provider_calls(self, job_id: str, attempt_id: str | None = None) -> list[sqlite3.Row]:
+        db = self._db()
+        if attempt_id is not None:
+            return db.execute(
+                "SELECT * FROM provider_calls WHERE job_id=? AND attempt_id=? ORDER BY id",
+                (job_id, attempt_id),
+            ).fetchall()
+        return db.execute(
+            "SELECT * FROM provider_calls WHERE job_id=? ORDER BY id", (job_id,)
         ).fetchall()
 
     def add_provider_call(self, values: dict[str, object]) -> int:

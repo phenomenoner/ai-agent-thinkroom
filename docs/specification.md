@@ -135,9 +135,9 @@ Long-running REST and MCP submission SHALL return a job handle rather than keep 
 
 A backend SHALL expose one operation accepting `BackendRequestV1` and returning one validated phase result. The request contains `schema_version`, `phase`, `job_id`, `attempt_id`, optional `branch_id`, `prompt_version`, `input`, expected output schema name, deadline, and correlation ID. Phases are `frame`, `fork`, `rollout`, `critique`, and `synthesis`. The application engine owns phase order and persistence; a backend owns provider invocation and raw-output parsing only.
 
-Provider output must be exactly one JSON object (an optional single Markdown JSON fence may be removed) and must validate against the phase schema. On malformed or invalid output, the same phase may be retried once with bounded validation feedback; a second failure terminates that phase. Backend-specific parsing, retry details, credentials, and invocation remain outside the research domain. Supported configuration values are `scripted`, `openai`, `prime_agent`, and `prime_agent_failover`.
+Provider output must be exactly one JSON object (an optional single Markdown JSON fence may be removed) and must validate against the phase schema. On malformed or invalid output, the same phase may be repaired once with bounded validation feedback on the route that produced the invalid output, if the shared three-call physical budget and deadline still permit it. Backend-specific parsing, retry details, credentials, and invocation remain outside the research domain. Supported configuration values are `scripted`, `openai`, `prime_agent`, and `prime_agent_failover`.
 
-`prime_agent_failover` invokes one explicitly configured Prime Agent primary and, only after `PROVIDER_ERROR` or `BACKEND_TIMEOUT`, one explicitly configured Prime Agent fallback. The routes execute sequentially inside the existing logical provider-capacity lease. Cancellation, deadline exhaustion, malformed/schema-invalid output, invalid requests, context/output limits, and unsupported phases never cross providers. Each physical provider invocation has its own ordered `provider_calls` row with the physical backend/model and a safe status; the primary availability failure is durably settled before the fallback row is created. No credential, raw provider error, prompt, or response is persisted. The attempt records the complete `primary->fallback` policy. A recovered retry must match that policy exactly. Startup recovery fails an interrupted failover attempt closed as `PROVIDER_ATTEMPT_INTERRUPTED`, marks an unfinished physical call `uncertain`, and never automatically replays an invocation that may already have been sent.
+`prime_agent_failover` invokes one explicitly configured Prime Agent primary and one explicitly configured fallback under the contract in [Provider resilience and progress](provider-resilience-v0.2.5.md). A fast transient or rate limit may retry the same route once; a timeout skips same-route retry. Availability or an unclassified error may then use the fallback. Output limits, cancellation, fencing, and deadline exhaustion are terminal. Each `(attempt, phase, branch)` is limited to three physical calls across retry, fallback, and route-preserving schema repair. Persisted call evidence reconstructs an attempt-local primary circuit after restart and prevents new primary calls after one timeout or two fast transient failures; rate limits do not contribute. No credential, raw provider error, prompt, or response is persisted.
 
 ### REQ-010 — Safety and operations
 
@@ -287,7 +287,7 @@ Long LLM calls require asynchronous jobs and durable state, but v0.2 is a single
 - `syntheses`: one result per successful attempt naming consumed critique and branch IDs.
 - `idempotency_keys`: key, request hash, job id.
 
-JSON payloads are versioned. v0.1.0 creates the canonical schema only when the database is empty. Any existing noncanonical or prerelease schema is rejected before DDL or other writes and readiness remains false; no v0.1.0 auto-upgrade path is claimed. A future schema migration requires an explicit versioned migration contract and independent release evidence before readiness may succeed.
+JSON payloads are versioned. An empty database receives the current canonical schema. Only the exact canonical v0.2.4 provider-call schema may migrate to v0.2.5: append `route_role`, `effective_timeout_seconds`, and `error_code` columns to `provider_calls`, then re-attest the complete v0.2.5 shape before readiness. Any other existing noncanonical or prerelease schema is rejected before live DDL or other writes and readiness remains false. A future schema migration requires another explicit versioned contract and independent release evidence before readiness may succeed.
 
 Retention defaults to 30 days for completed jobs and never deletes active jobs. Cleanup is bounded per cycle and disabled only by explicit configuration. A job exceeding its persisted-byte budget fails with `ARTIFACT_LIMIT_EXCEEDED`; data already persisted remains available for diagnosis.
 
@@ -299,9 +299,11 @@ Environment variables use prefix `THINKROOM_`. Explicit embedded/CLI configurati
 |---|---:|---|
 | `DATABASE_URL` | `sqlite+aiosqlite:///.data/thinkroom.db` | SQLite only in v0.2 |
 | `BACKEND` | `scripted` | `scripted`, `openai`, `prime_agent`, `prime_agent_failover` |
-| `MAX_CONCURRENCY` | 3 | 1–12 |
+| `MAX_CONCURRENCY` | 1 | 1–12 |
+| `ROLLOUT_PROVIDER_CONCURRENCY` | 1 | 1–2 |
 | `MAX_QUEUED_JOBS` | 100 | 1–10,000 |
-| `JOB_TIMEOUT_SECONDS` | 900 | 30–7,200 |
+| `JOB_SOFT_TIMEOUT_SECONDS` | 900 | 30–7,199 and must leave the configured provider reserve |
+| `JOB_TIMEOUT_SECONDS` | 1,200 | 30–7,200 |
 | `BACKEND_TIMEOUT_SECONDS` | 180 | 10–1,800 and no greater than job timeout |
 | `FAILOVER_PRIMARY_TIMEOUT_SECONDS` | 90 | 10–1,799 and less than backend timeout in failover mode |
 | `MAX_JOB_ATTEMPTS` | 2 | 1–5 |

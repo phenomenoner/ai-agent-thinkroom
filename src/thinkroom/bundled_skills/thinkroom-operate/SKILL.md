@@ -1,11 +1,12 @@
 ---
 name: thinkroom-operate
 description: Operate Thinkroom research jobs
-version: 0.2.4
-author: CK, Martin (Hermes Agent)
 license: MIT
-platforms: [linux]
-tags: [thinkroom, research, operations]
+metadata:
+  version: "0.2.5"
+  author: "CK, Martin (Hermes Agent)"
+  platforms: "linux"
+  tags: "thinkroom, research, operations"
 ---
 
 # Thinkroom operate
@@ -68,6 +69,15 @@ main-agent polling. If the available API has no blocking wait, place a finite
 terminal-state observation loop inside that one supervised process; do not turn each
 observation into a new agent turn. Interpret only `succeeded`, `failed`, or `cancelled`
 as terminal, and stop when the declared wait budget is exhausted.
+
+Use the derived `progress` observation to distinguish active provider work, queued rollout work,
+fallback/repair degradation, and a presumed-dead call. Its `observed_at` and
+`evidence_watermark` fields make the observation boundary explicit; it is not transactionally
+exact. Do not describe a live fallback call or work waiting behind a known call as stalled.
+
+A succeeded job can have `completion_status: partial` when its soft deadline prevents more phases
+from starting. Preserve the `partial` artifact and branch failures, but do not present it as a
+completed synthesis or as evidence that every requested perspective ran.
 
 ## Cancel
 

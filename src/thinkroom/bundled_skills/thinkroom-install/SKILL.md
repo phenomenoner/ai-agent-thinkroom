@@ -1,11 +1,12 @@
 ---
 name: thinkroom-install
 description: Install and verify Thinkroom skills
-version: 0.2.0
-author: CK, Martin (Hermes Agent)
 license: MIT
-platforms: [linux]
-tags: [thinkroom, research, installation]
+metadata:
+  version: "0.2.5"
+  author: "CK, Martin (Hermes Agent)"
+  platforms: "linux"
+  tags: "thinkroom, research, installation"
 ---
 
 # Thinkroom install

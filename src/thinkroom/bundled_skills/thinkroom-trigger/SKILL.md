@@ -1,11 +1,12 @@
 ---
 name: thinkroom-trigger
 description: Choose Thinkroom for consequential uncertainty
-version: 0.2.0
-author: CK, Martin (Hermes Agent)
 license: MIT
-platforms: [linux]
-tags: [thinkroom, research, decision-support]
+metadata:
+  version: "0.2.5"
+  author: "CK, Martin (Hermes Agent)"
+  platforms: "linux"
+  tags: "thinkroom, research, decision-support"
 ---
 
 # Thinkroom trigger

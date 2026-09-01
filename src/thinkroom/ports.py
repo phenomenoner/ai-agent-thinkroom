@@ -44,7 +44,15 @@ class RolloutBackend(Protocol):
 class ProviderInvocationAudit(Protocol):
     """Application-owned durable audit seam for one physical provider call."""
 
-    def start(self, request: BackendRequestV1, backend: str, model: str) -> int: ...
+    def start(
+        self,
+        request: BackendRequestV1,
+        backend: str,
+        model: str,
+        *,
+        route_role: str = "single",
+        effective_timeout_seconds: float = 0,
+    ) -> int: ...
 
     def finish(
         self,
@@ -52,6 +60,8 @@ class ProviderInvocationAudit(Protocol):
         request: BackendRequestV1,
         output_status: str,
         output_size: int = 0,
+        *,
+        error_code: str | None = None,
     ) -> bool: ...
 
 

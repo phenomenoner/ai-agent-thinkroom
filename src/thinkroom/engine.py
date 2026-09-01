@@ -41,11 +41,16 @@ PHASE_MODELS: dict[str, type[Any]] = {
 
 _PROVIDER_ERROR_MESSAGES = {
     "BACKEND_TIMEOUT": "backend invocation timed out",
+    "CALL_BUDGET_EXHAUSTED": "physical provider call budget exhausted",
     "CONTEXT_LIMIT_EXCEEDED": "provider request exceeds configured limit",
     "INVALID_REQUEST": "provider request is invalid",
+    "DEADLINE_INSUFFICIENT": "remaining deadline cannot cover provider work",
     "MALFORMED_PROVIDER_OUTPUT": "provider output was not valid",
     "OUTPUT_LIMIT_EXCEEDED": "provider response exceeded configured limit",
     "PROVIDER_ERROR": "provider invocation failed",
+    "RATE_LIMITED": "provider rate limited the invocation",
+    "SOFT_DEADLINE_REACHED": "job soft deadline reached",
+    "UNCLASSIFIED_ERROR": "provider returned an unclassified error",
     "UNSUPPORTED_PHASE": "provider phase is unsupported",
 }
 
@@ -93,7 +98,15 @@ class _RepositoryProviderInvocationAudit:
         self.repo = repo
         self.retry_index = retry_index
 
-    def start(self, request: BackendRequestV1, backend: str, model: str) -> int:
+    def start(
+        self,
+        request: BackendRequestV1,
+        backend: str,
+        model: str,
+        *,
+        route_role: str = "single",
+        effective_timeout_seconds: float = 0,
+    ) -> int:
         return self.repo.add_provider_call(
             {
                 "job_id": request.job_id,
@@ -107,8 +120,21 @@ class _RepositoryProviderInvocationAudit:
                 "retry_index": self.retry_index,
                 "output_status": "started",
                 "output_size": 0,
+                "route_role": route_role,
+                "effective_timeout_seconds": effective_timeout_seconds,
+                "error_code": None,
             }
         )
+
+    def history(self, request: BackendRequestV1) -> list[Any]:
+        return [
+            row
+            for row in self.repo.provider_calls(request.job_id, request.attempt_id)
+            if row["phase"] == request.phase and row["branch_id"] == request.branch_id
+        ]
+
+    def attempt_history(self, request: BackendRequestV1) -> list[Any]:
+        return self.repo.provider_calls(request.job_id, request.attempt_id)
 
     def finish(
         self,
@@ -116,6 +142,8 @@ class _RepositoryProviderInvocationAudit:
         request: BackendRequestV1,
         output_status: str,
         output_size: int = 0,
+        *,
+        error_code: str | None = None,
     ) -> bool:
         if output_status == "cancelled":
             return self.repo.settle_cancelled_provider_call(
@@ -130,6 +158,7 @@ class _RepositoryProviderInvocationAudit:
             ended_at=datetime.now(UTC).isoformat(),
             output_status=output_status,
             output_size=output_size,
+            error_code=error_code,
         )
 
 
@@ -160,7 +189,11 @@ class ResearchEngine:
         # Provider assertions are never trusted by default. Deployments may inject
         # an independent verifier for local artifacts or authoritative records.
         self.evidence_verifier = evidence_verifier
-        self._semaphore = asyncio.Semaphore(settings.max_concurrency)
+        self._serial_provider_semaphore = asyncio.Semaphore(1)
+        # Compatibility alias for existing readiness diagnostics. Rollout calls use
+        # the separate canary semaphore below.
+        self._semaphore = self._serial_provider_semaphore
+        self._rollout_provider_semaphore = asyncio.Semaphore(settings.rollout_provider_concurrency)
         self._workers: list[asyncio.Task[None]] = []
         self._active: dict[str, asyncio.Task[None]] = {}
         self._detached_provider_tasks: set[asyncio.Task[dict[str, Any]]] = set()
@@ -241,13 +274,15 @@ class ResearchEngine:
             raise RuntimeError("provider task did not stop")
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _detach_provider_task(self, task: asyncio.Task[dict[str, Any]]) -> None:
+    def _detach_provider_task(
+        self, task: asyncio.Task[dict[str, Any]], semaphore: asyncio.Semaphore
+    ) -> None:
         """Fence a noncooperative provider while retaining its concurrency lease."""
         self._detached_provider_tasks.add(task)
 
         def completed(done: asyncio.Task[dict[str, Any]]) -> None:
             self._detached_provider_tasks.discard(done)
-            self._semaphore.release()
+            semaphore.release()
             if not done.cancelled():
                 try:
                     done.exception()
@@ -257,37 +292,98 @@ class ResearchEngine:
         task.add_done_callback(completed)
 
     async def _invoke_provider_bounded(
-        self, request: BackendRequestV1, deadline: datetime, retry_index: int
+        self,
+        request: BackendRequestV1,
+        deadline: datetime,
+        retry_index: int,
+        admission_deadline: datetime | None = None,
+        logical_call_id: list[int | None] | None = None,
     ) -> dict[str, Any]:
-        remaining = (deadline - datetime.now(UTC)).total_seconds()
+        semaphore = (
+            self._rollout_provider_semaphore
+            if request.phase == "rollout"
+            else self._serial_provider_semaphore
+        )
+        start_by = min(deadline, admission_deadline) if admission_deadline else deadline
+        soft_limits_admission = admission_deadline is not None and admission_deadline < deadline
+        remaining = (start_by - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
-            raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded")
+            code = "SOFT_DEADLINE_REACHED" if soft_limits_admission else "DEADLINE_EXCEEDED"
+            raise BackendError(code, "provider call admission deadline exceeded")
         try:
-            await asyncio.wait_for(self._semaphore.acquire(), timeout=remaining)
+            await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
         except TimeoutError:
-            raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded") from None
+            code = "SOFT_DEADLINE_REACHED" if soft_limits_admission else "DEADLINE_EXCEEDED"
+            raise BackendError(code, "provider call admission deadline exceeded") from None
 
-        invoke_with_audit = getattr(self.backend, "invoke_with_audit", None)
-        if callable(invoke_with_audit):
-            audit = _RepositoryProviderInvocationAudit(self.repo, retry_index)
-            invocation = cast(Any, invoke_with_audit)(request, audit)
-        else:
-            invocation = self.backend.invoke(request)
-        task: asyncio.Task[dict[str, Any]] = asyncio.create_task(invocation)
+        if (
+            soft_limits_admission
+            and admission_deadline is not None
+            and admission_deadline <= datetime.now(UTC)
+        ):
+            semaphore.release()
+            raise BackendError("SOFT_DEADLINE_REACHED", "job soft deadline reached")
+
+        remaining_after_acquire = (deadline - datetime.now(UTC)).total_seconds()
+        if remaining_after_acquire <= 0:
+            semaphore.release()
+            raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded")
+        failover_manages_route_timeouts = hasattr(self.backend, "primary_timeout_seconds")
+        if (
+            not failover_manages_route_timeouts
+            and remaining_after_acquire < self.settings.backend_timeout_seconds
+        ):
+            semaphore.release()
+            raise BackendError(
+                "DEADLINE_INSUFFICIENT",
+                "remaining deadline cannot cover the configured provider timeout",
+            )
+        try:
+            invoke_with_audit = getattr(self.backend, "invoke_with_audit", None)
+            if callable(invoke_with_audit):
+                audit = _RepositoryProviderInvocationAudit(self.repo, retry_index)
+                invocation = cast(Any, invoke_with_audit)(request, audit)
+            else:
+                call_id = self.repo.add_provider_call(
+                    {
+                        "job_id": request.job_id,
+                        "attempt_id": request.attempt_id,
+                        "phase": request.phase,
+                        "branch_id": request.branch_id,
+                        "prompt_version": request.prompt_version,
+                        "backend": self.backend.name,
+                        "model": getattr(self.backend, "model", "unknown"),
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "retry_index": retry_index,
+                        "output_status": "started",
+                        "output_size": 0,
+                        "route_role": "single",
+                        "effective_timeout_seconds": self.settings.backend_timeout_seconds,
+                        "error_code": None,
+                    }
+                )
+                if logical_call_id is not None:
+                    logical_call_id[0] = call_id
+                invocation = self.backend.invoke(request)
+            task: asyncio.Task[dict[str, Any]] = asyncio.create_task(invocation)
+        except BaseException:
+            semaphore.release()
+            raise
         detached = False
         try:
-            remaining_after_acquire = (deadline - datetime.now(UTC)).total_seconds()
-            if remaining_after_acquire <= 0:
-                task.cancel()
-                self._detach_provider_task(task)
-                detached = True
-                raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded")
-            deadline_limited = remaining_after_acquire <= self.settings.backend_timeout_seconds
-            timeout = min(self.settings.backend_timeout_seconds, remaining_after_acquire)
+            deadline_limited = (
+                failover_manages_route_timeouts
+                or remaining_after_acquire <= self.settings.backend_timeout_seconds
+            )
+            timeout = (
+                remaining_after_acquire
+                if failover_manages_route_timeouts
+                else min(self.settings.backend_timeout_seconds, remaining_after_acquire)
+            )
             done, _ = await asyncio.wait({task}, timeout=timeout)
             if not done:
                 task.cancel()
-                self._detach_provider_task(task)
+                self._detach_provider_task(task, semaphore)
                 detached = True
                 if deadline_limited:
                     raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded")
@@ -301,12 +397,12 @@ class ResearchEngine:
         except asyncio.CancelledError:
             if not task.done():
                 task.cancel()
-                self._detach_provider_task(task)
+                self._detach_provider_task(task, semaphore)
                 detached = True
             raise
         finally:
             if not detached:
-                self._semaphore.release()
+                semaphore.release()
 
     async def _worker(self, worker_id: int) -> None:
         while not self._stopping:
@@ -480,25 +576,56 @@ class ResearchEngine:
     ) -> None:
         row = self.repo.get_job(job_id)
         assert row is not None
+        created_at = datetime.fromisoformat(row["created_at"])
+        soft_deadline = min(
+            deadline,
+            created_at + timedelta(seconds=self.settings.job_soft_timeout_seconds),
+        )
         request = ResearchRequest.model_validate_json(row["request_json"])
         pack = get_pack(request.domain)
         strategy = STRATEGIES.get(request.strategy)
         if strategy is None:
             raise BackendError("INVALID_STRATEGY", "unknown strategy")
         await self._guard(job_id, aid, deadline)
-        frame = await self._phase(
-            "frame",
-            job_id,
-            aid,
-            None,
-            {**pack.frame(request), "strategy": request.strategy},
-            deadline,
-            correlation,
-            pack.prompt_version,
-        )
+        try:
+            frame = await self._phase(
+                "frame",
+                job_id,
+                aid,
+                None,
+                {**pack.frame(request), "strategy": request.strategy},
+                deadline,
+                correlation,
+                pack.prompt_version,
+                admission_deadline=soft_deadline,
+            )
+        except BackendError as exc:
+            if exc.code != "SOFT_DEADLINE_REACHED":
+                raise
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=[],
+                failed_branch_ids=[],
+                skipped_branch_ids=[],
+                skipped_phases=["frame", "fork", "rollout", "critique", "synthesis"],
+            )
+            return
         await self._guard(job_id, aid, deadline)
         self.repo.put_artifact(job_id, aid, "frame", frame.model_dump(mode="json"))
         self.repo.transition(job_id, JobState.ROLLING_OUT, aid, "frame complete", correlation)
+        if datetime.now(UTC) >= soft_deadline:
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=[],
+                failed_branch_ids=[],
+                skipped_branch_ids=[],
+                skipped_phases=["fork", "rollout", "critique", "synthesis"],
+            )
+            return
         fork_input = {
             "frame": frame.model_dump(mode="json"),
             "branch_count": request.branch_count,
@@ -519,9 +646,21 @@ class ResearchEngine:
                 correlation,
                 pack.prompt_version,
                 repair_budget=fork_repair_budget,
+                admission_deadline=soft_deadline,
             )
         except (ValidationError, BackendError) as exc:
             if isinstance(exc, BackendError):
+                if exc.code == "SOFT_DEADLINE_REACHED":
+                    self._settle_partial(
+                        job_id,
+                        aid,
+                        correlation,
+                        successful_branch_ids=[],
+                        failed_branch_ids=[],
+                        skipped_branch_ids=[],
+                        skipped_phases=["fork", "rollout", "critique", "synthesis"],
+                    )
+                    return
                 if exc.code not in {"MALFORMED_PROVIDER_OUTPUT", "OUTPUT_LIMIT_EXCEEDED"}:
                     raise
             # _phase already performed the one allowed provider regeneration.
@@ -549,6 +688,7 @@ class ResearchEngine:
                 pack.prompt_version,
                 fork_repair_budget,
                 pack,
+                soft_deadline,
             )
         await self._guard(job_id, aid, deadline)
         self.repo.put_artifact(
@@ -561,8 +701,22 @@ class ResearchEngine:
                 "provenance_warning": warning,
             },
         )
+        perspective_branch_ids = [f"branch-{perspective.id}" for perspective in perspectives]
+        if datetime.now(UTC) >= soft_deadline:
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=[],
+                failed_branch_ids=[],
+                skipped_branch_ids=perspective_branch_ids,
+                skipped_phases=["rollout", "critique", "synthesis"],
+            )
+            return
 
-        async def rollout(perspective: Any) -> tuple[str, BranchOutputV1 | None, str | None]:
+        async def rollout(
+            perspective: Any,
+        ) -> tuple[str, BranchOutputV1 | None, str | None, str | None]:
             bid = f"branch-{perspective.id}"
             try:
                 result = await self._phase(
@@ -580,13 +734,14 @@ class ResearchEngine:
                     deadline,
                     correlation,
                     pack.prompt_version,
+                    admission_deadline=soft_deadline,
                 )
                 result = self._normalize_evidence(result)
                 await self._guard(job_id, aid, deadline)
                 self.repo.put_artifact(
                     job_id, aid, "branch", result.model_dump(mode="json"), bid, "succeeded"
                 )
-                return bid, result, None
+                return bid, result, None, None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -594,7 +749,7 @@ class ResearchEngine:
                 if code == "ARTIFACT_LIMIT_EXCEEDED":
                     raise
                 self.repo.put_artifact(job_id, aid, "branch", {}, bid, "failed", message)
-                return bid, None, message
+                return bid, None, message, code
 
         raw_outcomes = await asyncio.gather(
             *(rollout(p) for p in perspectives), return_exceptions=True
@@ -602,10 +757,28 @@ class ResearchEngine:
         for outcome in raw_outcomes:
             if isinstance(outcome, BaseException):
                 raise outcome
-        outcomes = cast(list[tuple[str, BranchOutputV1 | None, str | None]], raw_outcomes)
+        outcomes = cast(
+            list[tuple[str, BranchOutputV1 | None, str | None, str | None]], raw_outcomes
+        )
         await self._guard(job_id, aid, deadline)
-        successful = [(bid, result) for bid, result, _ in outcomes if result is not None]
-        failed = [{"branch_id": bid, "error": error} for bid, _, error in outcomes if error]
+        successful = [(bid, result) for bid, result, _, _ in outcomes if result is not None]
+        skipped_ids = [bid for bid, _, _, code in outcomes if code == "SOFT_DEADLINE_REACHED"]
+        failed = [
+            {"branch_id": bid, "error": error}
+            for bid, _, error, code in outcomes
+            if error and code != "SOFT_DEADLINE_REACHED"
+        ]
+        if skipped_ids or datetime.now(UTC) >= soft_deadline:
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=[bid for bid, _ in successful],
+                failed_branch_ids=[item["branch_id"] for item in failed],
+                skipped_branch_ids=skipped_ids,
+                skipped_phases=["critique", "synthesis"],
+            )
+            return
         if not successful:
             raise BackendError("NO_SUCCESSFUL_BRANCHES", "all branch rollouts failed")
         self.repo.transition(job_id, JobState.CRITIQUING, aid, "all branches terminal", correlation)
@@ -619,17 +792,32 @@ class ResearchEngine:
             "failed_branches": failed,
         }
         critique_repair_budget = [1]
-        critique = await self._phase(
-            "critique",
-            job_id,
-            aid,
-            None,
-            critique_input,
-            deadline,
-            correlation,
-            pack.prompt_version,
-            repair_budget=critique_repair_budget,
-        )
+        try:
+            critique = await self._phase(
+                "critique",
+                job_id,
+                aid,
+                None,
+                critique_input,
+                deadline,
+                correlation,
+                pack.prompt_version,
+                repair_budget=critique_repair_budget,
+                admission_deadline=soft_deadline,
+            )
+        except BackendError as exc:
+            if exc.code != "SOFT_DEADLINE_REACHED":
+                raise
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=successful_ids,
+                failed_branch_ids=[item["branch_id"] for item in failed],
+                skipped_branch_ids=[],
+                skipped_phases=["critique", "synthesis"],
+            )
+            return
         if (
             set(critique.consumed_branch_ids) != set(successful_ids)
             or len(critique.consumed_branch_ids) != len(successful_ids)
@@ -639,21 +827,36 @@ class ResearchEngine:
             if critique_repair_budget[0] <= 0:
                 raise BackendError("INVALID_PROVENANCE", "critique branch coverage is incomplete")
             critique_repair_budget[0] -= 1
-            critique = await self._phase(
-                "critique",
-                job_id,
-                aid,
-                None,
-                {
-                    **critique_input,
-                    "validation_feedback": "Use every successful_branch_id exactly once in consumed_branch_ids and branch_assessments; use no other branch IDs.",
-                },
-                deadline,
-                correlation,
-                pack.prompt_version,
-                repair_budget=critique_repair_budget,
-                retry_offset=1,
-            )
+            try:
+                critique = await self._phase(
+                    "critique",
+                    job_id,
+                    aid,
+                    None,
+                    {
+                        **critique_input,
+                        "validation_feedback": "Use every successful_branch_id exactly once in consumed_branch_ids and branch_assessments; use no other branch IDs.",
+                    },
+                    deadline,
+                    correlation,
+                    pack.prompt_version,
+                    repair_budget=critique_repair_budget,
+                    retry_offset=1,
+                    admission_deadline=soft_deadline,
+                )
+            except BackendError as exc:
+                if exc.code != "SOFT_DEADLINE_REACHED":
+                    raise
+                self._settle_partial(
+                    job_id,
+                    aid,
+                    correlation,
+                    successful_branch_ids=successful_ids,
+                    failed_branch_ids=[item["branch_id"] for item in failed],
+                    skipped_branch_ids=[],
+                    skipped_phases=["critique", "synthesis"],
+                )
+                return
             if (
                 set(critique.consumed_branch_ids) != set(successful_ids)
                 or len(critique.consumed_branch_ids) != len(successful_ids)
@@ -667,6 +870,17 @@ class ResearchEngine:
         )
         critique_id = f"critique-{critique_artifact_id}"
         self.repo.transition(job_id, JobState.SYNTHESIZING, aid, "critique complete", correlation)
+        if datetime.now(UTC) >= soft_deadline:
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=successful_ids,
+                failed_branch_ids=[item["branch_id"] for item in failed],
+                skipped_branch_ids=[],
+                skipped_phases=["synthesis"],
+            )
+            return
         synthesis_input = {
             "frame": frame.model_dump(mode="json"),
             "successful_branches": [
@@ -679,17 +893,32 @@ class ResearchEngine:
             "successful_branch_ids": successful_ids,
         }
         synthesis_repair_budget = [1]
-        synthesis = await self._phase(
-            "synthesis",
-            job_id,
-            aid,
-            None,
-            synthesis_input,
-            deadline,
-            correlation,
-            pack.prompt_version,
-            repair_budget=synthesis_repair_budget,
-        )
+        try:
+            synthesis = await self._phase(
+                "synthesis",
+                job_id,
+                aid,
+                None,
+                synthesis_input,
+                deadline,
+                correlation,
+                pack.prompt_version,
+                repair_budget=synthesis_repair_budget,
+                admission_deadline=soft_deadline,
+            )
+        except BackendError as exc:
+            if exc.code != "SOFT_DEADLINE_REACHED":
+                raise
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=successful_ids,
+                failed_branch_ids=[item["branch_id"] for item in failed],
+                skipped_branch_ids=[],
+                skipped_phases=["synthesis"],
+            )
+            return
         try:
             synthesis = self._enforce_provenance(
                 synthesis, aid, critique_id, successful_ids, successful
@@ -700,21 +929,36 @@ class ResearchEngine:
             if synthesis_repair_budget[0] <= 0:
                 raise
             synthesis_repair_budget[0] -= 1
-            synthesis = await self._phase(
-                "synthesis",
-                job_id,
-                aid,
-                None,
-                {
-                    **synthesis_input,
-                    "validation_feedback": f"Use source_attempt_id {aid!r}, consumed_critique_id {critique_id!r}, consume exactly these branch IDs: {successful_ids!r}, and never upgrade an evidence verification status.",
-                },
-                deadline,
-                correlation,
-                pack.prompt_version,
-                repair_budget=synthesis_repair_budget,
-                retry_offset=1,
-            )
+            try:
+                synthesis = await self._phase(
+                    "synthesis",
+                    job_id,
+                    aid,
+                    None,
+                    {
+                        **synthesis_input,
+                        "validation_feedback": f"Use source_attempt_id {aid!r}, consumed_critique_id {critique_id!r}, consume exactly these branch IDs: {successful_ids!r}, and never upgrade an evidence verification status.",
+                    },
+                    deadline,
+                    correlation,
+                    pack.prompt_version,
+                    repair_budget=synthesis_repair_budget,
+                    retry_offset=1,
+                    admission_deadline=soft_deadline,
+                )
+            except BackendError as soft_exc:
+                if soft_exc.code != "SOFT_DEADLINE_REACHED":
+                    raise
+                self._settle_partial(
+                    job_id,
+                    aid,
+                    correlation,
+                    successful_branch_ids=successful_ids,
+                    failed_branch_ids=[item["branch_id"] for item in failed],
+                    skipped_branch_ids=[],
+                    skipped_phases=["synthesis"],
+                )
+                return
             synthesis = self._enforce_provenance(
                 synthesis, aid, critique_id, successful_ids, successful
             )
@@ -724,6 +968,41 @@ class ResearchEngine:
         self.repo.settle_terminal(
             job_id, JobState.SUCCEEDED, aid, "succeeded", "complete", correlation
         )
+
+    def _settle_partial(
+        self,
+        job_id: str,
+        aid: str,
+        correlation: str,
+        *,
+        successful_branch_ids: list[str],
+        failed_branch_ids: list[str],
+        skipped_branch_ids: list[str],
+        skipped_phases: list[str],
+    ) -> None:
+        self.repo.put_artifact(
+            job_id,
+            aid,
+            "partial",
+            {
+                "schema_version": 1,
+                "reason": "SOFT_DEADLINE_REACHED",
+                "generated_at": datetime.now(UTC).isoformat(),
+                "successful_branch_ids": successful_branch_ids,
+                "failed_branch_ids": failed_branch_ids,
+                "skipped_branch_ids": skipped_branch_ids,
+                "skipped_phases": skipped_phases,
+            },
+        )
+        if not self.repo.settle_terminal(
+            job_id,
+            JobState.SUCCEEDED,
+            aid,
+            "partial",
+            "soft deadline reached; partial evidence preserved",
+            correlation,
+        ):
+            raise BackendError("STALE_ATTEMPT", "attempt is no longer current")
 
     async def _diverse_fork(
         self,
@@ -737,6 +1016,7 @@ class ResearchEngine:
         prompt_version: str,
         repair_budget: list[int],
         pack: Any,
+        admission_deadline: datetime,
     ) -> tuple[list[Any], str | None]:
         if self._unique(fork) and len(fork.perspectives) == count:
             return fork.perspectives, None
@@ -757,6 +1037,7 @@ class ResearchEngine:
                 prompt_version,
                 repair_budget=repair_budget,
                 retry_offset=1,
+                admission_deadline=admission_deadline,
             )
         else:
             retry = fork
@@ -807,6 +1088,7 @@ class ResearchEngine:
         *,
         repair_budget: list[int] | None = None,
         retry_offset: int = 0,
+        admission_deadline: datetime | None = None,
     ) -> Any:
         budget = repair_budget if repair_budget is not None else [1]
         request = BackendRequestV1(
@@ -824,24 +1106,8 @@ class ResearchEngine:
         for retry in range(2):
             retry_index = retry_offset + retry
             await self._guard(job_id, aid, deadline)
-            physical_audit = callable(getattr(self.backend, "invoke_with_audit", None))
+            call_id_box: list[int | None] = [None]
             call_id: int | None = None
-            if not physical_audit:
-                call_id = self.repo.add_provider_call(
-                    {
-                        "job_id": job_id,
-                        "attempt_id": aid,
-                        "phase": phase,
-                        "branch_id": branch_id,
-                        "prompt_version": prompt_version,
-                        "backend": self.backend.name,
-                        "model": getattr(self.backend, "model", "unknown"),
-                        "started_at": datetime.now(UTC).isoformat(),
-                        "retry_index": retry_index,
-                        "output_status": "started",
-                        "output_size": 0,
-                    }
-                )
             output_size = 0
             try:
                 serialized_input = json.dumps(
@@ -866,7 +1132,14 @@ class ResearchEngine:
                     },
                 )
                 await self._guard(job_id, aid, deadline)
-                raw = await self._invoke_provider_bounded(request, deadline, retry_index)
+                raw = await self._invoke_provider_bounded(
+                    request,
+                    deadline,
+                    retry_index,
+                    admission_deadline,
+                    call_id_box,
+                )
+                call_id = call_id_box[0]
                 await self._guard(job_id, aid, deadline)
                 encoded = json.dumps(raw, ensure_ascii=False).encode()
                 output_size = len(encoded)
@@ -914,6 +1187,7 @@ class ResearchEngine:
                 )
                 return result
             except asyncio.CancelledError:
+                call_id = call_id_box[0]
                 (
                     selected_backend,
                     selected_model,
@@ -932,6 +1206,7 @@ class ResearchEngine:
                 raise
             except Exception as exc:
                 last = exc
+                call_id = call_id_box[0]
                 (
                     selected_backend,
                     selected_model,
@@ -956,6 +1231,13 @@ class ResearchEngine:
                         output_size=output_size,
                         backend=selected_backend,
                         model=selected_model,
+                        error_code=(
+                            exc.code
+                            if isinstance(exc, BackendError)
+                            else "MALFORMED_PROVIDER_OUTPUT"
+                            if isinstance(exc, ValidationError)
+                            else "UNCLASSIFIED_ERROR"
+                        ),
                     )
                 retryable = isinstance(exc, ValidationError) or (
                     isinstance(exc, BackendError) and exc.code == "MALFORMED_PROVIDER_OUTPUT"

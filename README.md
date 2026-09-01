@@ -209,8 +209,10 @@ export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
 export THINKROOM_PRIME_AGENT_MODEL=gpt-5.6-luna
 export THINKROOM_PRIME_AGENT_THINKING=max
 export THINKROOM_MAX_CONCURRENCY=1
-export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
-export THINKROOM_JOB_TIMEOUT_SECONDS=3600
+export THINKROOM_ROLLOUT_PROVIDER_CONCURRENCY=1
+export THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=180
+export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 ```
 
 For one sequential Prime Agent availability fallback, keep the same executable and configure both
@@ -225,13 +227,18 @@ export THINKROOM_PRIME_AGENT_THINKING=high
 export THINKROOM_PRIME_AGENT_FALLBACK_PROVIDER=openai-codex
 export THINKROOM_PRIME_AGENT_FALLBACK_MODEL=gpt-5.6-terra
 export THINKROOM_PRIME_AGENT_FALLBACK_THINKING=high
-export THINKROOM_FAILOVER_PRIMARY_TIMEOUT_SECONDS=300
-export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
+export THINKROOM_FAILOVER_PRIMARY_TIMEOUT_SECONDS=90
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=180
+export THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900
+export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 ```
 
-The fallback is attempted only for `PROVIDER_ERROR` or `BACKEND_TIMEOUT`; malformed output,
-validation, limits, cancellation, and deadline exhaustion remain on the original route. Put API
-keys in a mode-0600 service environment file rather than in source, unit text, logs, or the database.
+One fast provider failure can retry the same route once before fallback; a timeout skips that retry.
+All retry, fallback, and route-preserving schema repair work shares a three-call phase budget.
+`OUTPUT_LIMIT_EXCEEDED`, cancellation, fencing, and exhausted deadlines never amplify across routes.
+Put API keys in a mode-0600 service environment file rather than in source, unit text, logs, or the
+database. See [Provider resilience and progress](docs/provider-resilience-v0.2.5.md) for the exact
+deadline, circuit, partial-result, and concurrency contract.
 
 Authenticate that [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) installation first
 with its interactive `/login` flow. The adapter
@@ -260,7 +267,7 @@ For the release-authorized production path, download the wheel, `requirements-pr
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.4-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.5-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 
