@@ -209,9 +209,34 @@ export THINKROOM_PRIME_AGENT_PROVIDER=openai-codex
 export THINKROOM_PRIME_AGENT_MODEL=gpt-5.6-luna
 export THINKROOM_PRIME_AGENT_THINKING=max
 export THINKROOM_MAX_CONCURRENCY=1
-export THINKROOM_BACKEND_TIMEOUT_SECONDS=600
-export THINKROOM_JOB_TIMEOUT_SECONDS=3600
+export THINKROOM_ROLLOUT_PROVIDER_CONCURRENCY=1
+export THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=180
+export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 ```
+
+若要在主要 route 不可用時做一次循序 fallback，請使用同一個 executable 並明確設定兩條 route：
+
+```bash
+export THINKROOM_BACKEND=prime_agent_failover
+export THINKROOM_PRIME_AGENT_EXECUTABLE=/absolute/path/to/prime-agent
+export THINKROOM_PRIME_AGENT_PROVIDER=openrouter
+export THINKROOM_PRIME_AGENT_MODEL=z-ai/glm-5.3-flash
+export THINKROOM_PRIME_AGENT_THINKING=high
+export THINKROOM_PRIME_AGENT_FALLBACK_PROVIDER=openai-codex
+export THINKROOM_PRIME_AGENT_FALLBACK_MODEL=gpt-5.6-terra
+export THINKROOM_PRIME_AGENT_FALLBACK_THINKING=high
+export THINKROOM_FAILOVER_PRIMARY_TIMEOUT_SECONDS=90
+export THINKROOM_BACKEND_TIMEOUT_SECONDS=180
+export THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900
+export THINKROOM_JOB_TIMEOUT_SECONDS=1200
+```
+
+只有在 provider error 於 fast-transient 門檻內結束時，才會在同一 route 重試一次；timeout
+會直接跳過重試。重試、fallback 與保留原 route 的 schema repair 共用每個 phase/branch 三次
+實體呼叫預算。`OUTPUT_LIMIT_EXCEEDED`、取消、fencing 與耗盡的 deadline 都不會跨 route 放大。
+完整 deadline、circuit、partial-result 與 concurrency contract 請見
+[Provider resilience and progress](docs/provider-resilience-v0.2.5.md)。
 
 請先透過 [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) 的互動式 `/login`
 流程完成認證。Thinkroom 不會複製 OAuth 憑證；
@@ -237,7 +262,7 @@ process 完整 settle 後清除。
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.4-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.5-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 

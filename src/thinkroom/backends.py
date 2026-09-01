@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
+from weakref import WeakValueDictionary
 
 import httpx
 
@@ -1039,6 +1040,10 @@ class BackendInvocationIdentity:
     call_settled: bool = False
 
 
+class _PrimaryCircuitOpen(Exception):
+    pass
+
+
 class FailoverBackend:
     """Enforce one durable, route-aware physical-call budget."""
 
@@ -1097,6 +1102,9 @@ class FailoverBackend:
         self.name = self._join_identity(primary.name, fallback.name, "backend")
         self.model = self._join_identity(primary.model, fallback.model, "model")
         self._identities: dict[tuple[str, str, str | None, str], BackendInvocationIdentity] = {}
+        self._attempt_admission_locks: WeakValueDictionary[str, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
 
     @staticmethod
     def _join_identity(primary: str, fallback: str, label: str) -> str:
@@ -1146,6 +1154,7 @@ class FailoverBackend:
         effective_timeout_seconds: float,
         used_fallback: bool,
         primary_error_code: str | None = None,
+        circuit_admission: bool = False,
     ) -> dict[str, Any]:
         remaining = (request.deadline - datetime.now(UTC)).total_seconds()
         if remaining < effective_timeout_seconds:
@@ -1154,25 +1163,41 @@ class FailoverBackend:
                 "remaining deadline cannot cover the configured route timeout",
             )
         call_id: int | None = None
-        if audit is not None:
-            try:
-                call_id = audit.start(
-                    request,
-                    route.name,
-                    route.model,
-                    route_role=route_role,
-                    effective_timeout_seconds=effective_timeout_seconds,
-                )
-            except TypeError:
-                # Compatibility for third-party audit adapters written before v0.2.5.
-                call_id = audit.start(request, route.name, route.model)
-        self._record(
-            request,
-            route,
-            used_fallback=used_fallback,
-            primary_error_code=primary_error_code,
-            call_id=call_id,
-        )
+
+        def admit() -> None:
+            nonlocal call_id
+            if circuit_admission and audit is not None:
+                if self._circuit_score(self._audit_rows(audit, "attempt_history", request)) >= 2:
+                    raise _PrimaryCircuitOpen
+            if audit is not None:
+                try:
+                    call_id = audit.start(
+                        request,
+                        route.name,
+                        route.model,
+                        route_role=route_role,
+                        effective_timeout_seconds=effective_timeout_seconds,
+                    )
+                except TypeError:
+                    # Compatibility for third-party audit adapters written before v0.2.5.
+                    call_id = audit.start(request, route.name, route.model)
+            self._record(
+                request,
+                route,
+                used_fallback=used_fallback,
+                primary_error_code=primary_error_code,
+                call_id=call_id,
+            )
+
+        if circuit_admission and audit is not None:
+            admission_lock = self._attempt_admission_locks.get(request.attempt_id)
+            if admission_lock is None:
+                admission_lock = asyncio.Lock()
+                self._attempt_admission_locks[request.attempt_id] = admission_lock
+            async with admission_lock:
+                admit()
+        else:
+            admit()
         try:
             return await route.invoke(request)
         except asyncio.CancelledError:
@@ -1295,6 +1320,7 @@ class FailoverBackend:
                 route_role="primary",
                 effective_timeout_seconds=self.primary_timeout_seconds,
                 used_fallback=False,
+                circuit_admission=True,
             )
 
         async def call_fallback() -> dict[str, Any]:
@@ -1319,6 +1345,10 @@ class FailoverBackend:
         primary_started = time.monotonic()
         try:
             return await call_primary()
+        except _PrimaryCircuitOpen:
+            calls_used -= 1
+            primary_error_code = "PROVIDER_ERROR"
+            return await call_fallback()
         except BackendError as exc:
             primary_duration = max(0.0, time.monotonic() - primary_started)
             current_rows = self._audit_rows(audit, "history", request)
@@ -1337,6 +1367,8 @@ class FailoverBackend:
                 calls_used += 1
                 try:
                     return await call_primary()
+                except _PrimaryCircuitOpen:
+                    calls_used -= 1
                 except BackendError as retry_exc:
                     primary_error_code = retry_exc.code
                     if (

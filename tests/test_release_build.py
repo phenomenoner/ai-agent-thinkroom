@@ -268,6 +268,16 @@ def test_public_package_declares_mit_license_repository_and_localization():
         assert "--require-hashes" in text
         assert "--no-deps" in text
         assert "verify_locked_runtime.py" in text
+        assert "thinkroom-0.2.5-py3-none-any.whl" in text
+        assert "thinkroom-0.2.4-py3-none-any.whl" not in text
+    for expected in (
+        "THINKROOM_ROLLOUT_PROVIDER_CONCURRENCY=1",
+        "THINKROOM_JOB_SOFT_TIMEOUT_SECONDS=900",
+        "THINKROOM_BACKEND_TIMEOUT_SECONDS=180",
+        "THINKROOM_JOB_TIMEOUT_SECONDS=1200",
+        "THINKROOM_FAILOVER_PRIMARY_TIMEOUT_SECONDS=90",
+    ):
+        assert expected in readme_zh_tw
 
 
 def test_release_docs_execute_the_flat_verifier_asset():

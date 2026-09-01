@@ -40,6 +40,26 @@ class SequenceBackend:
         return outcome
 
 
+class ConcurrentFastFailureBackend:
+    name = "primary"
+    model = "p"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._initial_started = 0
+        self._both_initial_started = asyncio.Event()
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        self.calls += 1
+        call_number = self.calls
+        if call_number <= 2:
+            self._initial_started += 1
+            if self._initial_started == 2:
+                self._both_initial_started.set()
+            await self._both_initial_started.wait()
+        raise BackendError("PROVIDER_ERROR", "reset")
+
+
 class PersistentAudit:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
@@ -305,6 +325,28 @@ async def test_rate_limit_retries_but_does_not_open_primary_circuit() -> None:
         "route": "primary-next"
     }
     assert (primary.calls, fallback.calls) == (3, 1)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fast_failures_recheck_attempt_circuit_before_retry() -> None:
+    primary = ConcurrentFastFailureBackend()
+    fallback = SequenceBackend(
+        "fallback",
+        "f",
+        [{"route": "fallback-a"}, {"route": "fallback-b"}],
+    )
+    audit = PersistentAudit()
+    backend = FailoverBackend(primary, fallback, retry_delay_seconds=(0, 0))
+
+    results = await asyncio.gather(
+        backend.invoke_with_audit(request(branch_id="a"), audit),
+        backend.invoke_with_audit(request(branch_id="b"), audit),
+    )
+
+    assert {result["route"] for result in results} == {"fallback-a", "fallback-b"}
+    assert primary.calls == 2
+    assert fallback.calls == 2
+    assert len([row for row in audit.rows if row["route_role"] == "primary"]) == 2
 
 
 @pytest.mark.asyncio
