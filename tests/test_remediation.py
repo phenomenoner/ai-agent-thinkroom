@@ -2469,7 +2469,11 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
         "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
         "'success': True}), flush=True)\n"
         "for _ in range(20):\n"
-        "    print(json.dumps({'type': 'message_update', 'delta': 'x' * 256}), flush=True)\n"
+        "    partial = {'role': 'assistant', 'content': "
+        "[{'type': 'text', 'text': 'x' * 128}]}\n"
+        "    print(json.dumps({'type': 'message_update', 'message': partial, "
+        "'assistantMessageEvent': {'type': 'text_delta', 'contentIndex': 0, "
+        "'delta': 'y' * 32, 'partial': partial}}), flush=True)\n"
         "sys.stdin.read()\n"
     )
     executable.chmod(0o755)
@@ -2501,11 +2505,12 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
     metrics = caught.value.transport_metrics
     assert metrics is not None
     assert metrics.raw_transport_bytes > 1024
-    assert metrics.event_count >= 4
-    assert metrics.max_event_bytes > 256
-    assert metrics.message_update_count >= 3
-    assert metrics.message_snapshot_bytes == 0
-    assert metrics.message_delta_bytes >= 3 * 256
+    assert metrics.event_count >= 3
+    assert metrics.max_event_bytes > 400
+    assert metrics.message_update_count >= 1
+    assert metrics.message_snapshot_bytes >= 128
+    assert metrics.message_partial_bytes >= 128
+    assert metrics.message_delta_bytes >= 32
 
 
 @pytest.mark.asyncio

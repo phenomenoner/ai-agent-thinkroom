@@ -178,14 +178,14 @@ async def test_failover_backend_does_not_cross_provider_for_nonavailability_erro
 
 
 @pytest.mark.asyncio
-async def test_failover_audit_preserves_output_limit_subtype_without_crossing_provider() -> None:
+async def test_failover_audit_preserves_semantic_output_limit_without_crossing_provider() -> None:
     primary = StaticBackend(
         "prime:openrouter",
         "glm",
         error=BackendError(
             "OUTPUT_LIMIT_EXCEEDED",
-            "raw transport exceeded byte limit",
-            audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+            "final text exceeded byte limit",
+            audit_status="OUTPUT_LIMIT_FINAL_TEXT",
         ),
     )
     fallback = StaticBackend("prime:openai-codex", "terra")
@@ -196,8 +196,8 @@ async def test_failover_audit_preserves_output_limit_subtype_without_crossing_pr
         await backend.invoke_with_audit(frame_request(), audit)
 
     assert raised.value.code == "OUTPUT_LIMIT_EXCEEDED"
-    assert raised.value.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
-    assert audit.statuses == ["OUTPUT_LIMIT_RAW_TRANSPORT"]
+    assert raised.value.audit_status == "OUTPUT_LIMIT_FINAL_TEXT"
+    assert audit.statuses == ["OUTPUT_LIMIT_FINAL_TEXT"]
     assert (primary.calls, fallback.calls) == (1, 0)
 
 

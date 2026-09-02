@@ -234,7 +234,9 @@ export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 
 只有在 provider error 於 fast-transient 門檻內結束時，才會在同一 route 重試一次；timeout
 會直接跳過重試。重試、fallback 與保留原 route 的 schema repair 共用每個 phase/branch 三次
-實體呼叫預算。`OUTPUT_LIMIT_EXCEEDED`、取消、fencing 與耗盡的 deadline 都不會跨 route 放大。
+實體呼叫預算。取消、fencing、耗盡的 deadline 與 semantic/result output limit 都不會跨 route
+放大。唯一例外是 primary raw-transport output limit：它不重試 primary，會開啟 attempt-local
+primary circuit，並可在同一預算內使用一次已設定的 fallback。
 完整 deadline、circuit、partial-result 與 concurrency contract 請見
 [Provider resilience and progress](docs/provider-resilience-v0.2.5.md)。
 

@@ -24,26 +24,31 @@ hard deadline. A fallback call is limited to 180 seconds and a primary call to 9
 One `(attempt, phase, branch)` may consume at most three physical calls. Retry, fallback, and repair
 limits are ceilings, not entitlements. The following precedence is evaluated after each outcome:
 
-1. `OUTPUT_LIMIT_EXCEEDED`, cancellation, stale fencing, or an exhausted deadline is terminal.
-2. Schema-invalid output may use one repair on the route that produced it, if a call slot remains.
-3. `BACKEND_TIMEOUT` never retries the same route and may use the fallback once.
-4. A fast transient provider error may retry the same route once after bounded jitter, then may use
+1. Cancellation, stale fencing, an exhausted deadline, and semantic/result output limits are
+   terminal.
+2. A primary `OUTPUT_LIMIT_RAW_TRANSPORT` failure never retries that route; it contributes two
+   circuit points and may use the fallback once. The same failure on fallback is terminal.
+3. Schema-invalid output may use one repair on the route that produced it, if a call slot remains.
+4. `BACKEND_TIMEOUT` never retries the same route and may use the fallback once.
+5. A fast transient provider error may retry the same route once after bounded jitter, then may use
    the fallback once.
-5. An unclassified error may use the fallback once, without same-route retry or repair.
+6. An unclassified error may use the fallback once, without same-route retry or repair.
 
 For example, `initial + retry + fallback` consumes all three calls; malformed fallback output cannot
 then be repaired. `primary timeout + fallback malformed + fallback repair` is exactly three calls.
 
 HTTP 429 is rate limiting: it is retryable but does not contribute to the primary circuit score.
-No deterministic output-limit failure is retried, repaired, or failed over.
+No output-limit failure is retried or repaired. The only output-limit fallback is the bounded,
+route-local primary raw-transport case above; final text, control, process-envelope, validated
+response, per-event, semantic-event, and telemetry-event limits remain terminal.
 
 ## Job-attempt-local primary circuit
 
 The primary circuit score is reconstructed from persisted physical-call evidence for the current
-attempt. `BACKEND_TIMEOUT` contributes two points, a fast transient provider error contributes one,
-and rate limiting contributes zero. The circuit opens at two points and never closes within the same
-attempt. It prevents new primary calls but does not cancel a primary call already in flight. A new
-attempt starts with a fresh score.
+attempt. `BACKEND_TIMEOUT` and `OUTPUT_LIMIT_RAW_TRANSPORT` each contribute two points, a fast
+transient provider error contributes one, and rate limiting contributes zero. The circuit opens at
+two points and never closes within the same attempt. It prevents new primary calls but does not
+cancel a primary call already in flight. A new attempt starts with a fresh score.
 
 Each provider-call record stores its route role, effective timeout, normalized error code, start/end
 times, attempt fence, and monotonic database id. Every primary-route invocation, including a
@@ -52,13 +57,14 @@ persisted-score recheck. If that repair is no longer admissible, it remains
 `MALFORMED_PROVIDER_OUTPUT`; it is neither started on primary nor rerouted to fallback. An unfinished
 call past its persisted timeout plus a small observation grace is `PRESUMED_DEAD`, never active.
 
-Prime RPC calls also settle six content-free transport counters: total raw bytes, total JSONL event
-count, largest event bytes, `message_update` count, cumulative serialized message-snapshot bytes, and
-cumulative serialized delta bytes. Counters are non-negative integers and contain no prompt,
-response, event, error, or provider text. They are captured on both success and typed backend error,
-survive process isolation, and remain optional for backends that cannot report them. These counters
-diagnose producer-side amplification; they do not relax any event, byte, deadline, or validation
-limit and do not make partial JSON acceptable.
+Prime RPC calls also settle seven content-free transport counters: total raw bytes, total JSONL event
+count, largest event bytes, `message_update` count, cumulative serialized `message` snapshot bytes,
+cumulative serialized `assistantMessageEvent.partial` bytes, and cumulative serialized delta bytes.
+Counters are non-negative integers and contain no prompt, response, event, error, or provider text.
+They are captured on both success and typed backend error, survive process isolation, and remain
+optional for backends that cannot report them. These counters diagnose producer-side amplification;
+they do not relax any event, byte, deadline, or validation limit and do not make partial JSON
+acceptable.
 
 ## Derived progress
 

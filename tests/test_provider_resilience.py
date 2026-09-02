@@ -347,6 +347,83 @@ async def test_output_limit_never_retries_or_falls_back() -> None:
 
 
 @pytest.mark.asyncio
+async def test_primary_raw_transport_limit_falls_back_once_and_opens_attempt_circuit() -> None:
+    primary = SequenceBackend(
+        "primary",
+        "p",
+        [
+            BackendError(
+                "OUTPUT_LIMIT_EXCEEDED",
+                "raw transport exceeded byte limit",
+                audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+            ),
+            {"unexpected": True},
+        ],
+    )
+    fallback = SequenceBackend(
+        "fallback",
+        "f",
+        [{"route": "fallback-a"}, {"route": "fallback-b"}],
+    )
+    audit = PersistentAudit()
+    backend = FailoverBackend(primary, fallback, retry_delay_seconds=(0, 0))
+
+    first = await backend.invoke_with_audit(request(branch_id="a"), audit)
+    second = await backend.invoke_with_audit(request(branch_id="b"), audit)
+
+    assert first == {"route": "fallback-a"}
+    assert second == {"route": "fallback-b"}
+    assert (primary.calls, fallback.calls) == (1, 2)
+    assert [row["route_role"] for row in audit.rows] == ["primary", "fallback", "fallback"]
+    assert audit.rows[0]["output_status"] == "OUTPUT_LIMIT_RAW_TRANSPORT"
+    assert audit.rows[0]["error_code"] == "OUTPUT_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_primary_retry_raw_transport_limit_uses_only_remaining_fallback_slot() -> None:
+    primary = SequenceBackend(
+        "primary",
+        "p",
+        [
+            BackendError("PROVIDER_ERROR", "reset"),
+            BackendError(
+                "OUTPUT_LIMIT_EXCEEDED",
+                "raw transport exceeded byte limit",
+                audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+            ),
+        ],
+    )
+    fallback = SequenceBackend("fallback", "f", [{"route": "fallback"}])
+    audit = PersistentAudit()
+    backend = FailoverBackend(primary, fallback, retry_delay_seconds=(0, 0))
+
+    assert await backend.invoke_with_audit(request(), audit) == {"route": "fallback"}
+    assert (primary.calls, fallback.calls) == (2, 1)
+    assert [row["route_role"] for row in audit.rows] == ["primary", "primary", "fallback"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_raw_transport_limit_is_terminal() -> None:
+    raw_limit = BackendError(
+        "OUTPUT_LIMIT_EXCEEDED",
+        "raw transport exceeded byte limit",
+        audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+    )
+    primary = SequenceBackend("primary", "p", [raw_limit])
+    fallback = SequenceBackend("fallback", "f", [raw_limit])
+    audit = PersistentAudit()
+    backend = FailoverBackend(primary, fallback, retry_delay_seconds=(0, 0))
+
+    with pytest.raises(BackendError) as raised:
+        await backend.invoke_with_audit(request(), audit)
+
+    assert raised.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert raised.value.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
+    assert (primary.calls, fallback.calls) == (1, 1)
+    assert [row["route_role"] for row in audit.rows] == ["primary", "fallback"]
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_retries_but_does_not_open_primary_circuit() -> None:
     primary = SequenceBackend(
         "primary",
@@ -412,6 +489,16 @@ def test_v025_deadline_and_concurrency_defaults_are_bounded() -> None:
     assert settings.rollout_provider_concurrency <= 2
 
 
+def test_transport_metrics_reject_unknown_or_nonnumeric_process_data() -> None:
+    valid = BackendTransportMetrics().as_dict()
+    with pytest.raises(ValueError, match="shape"):
+        BackendTransportMetrics.from_untrusted({**valid, "provider_text": "secret"})
+    with pytest.raises(ValueError, match="non-negative"):
+        BackendTransportMetrics.from_untrusted({**valid, "raw_transport_bytes": "123"})
+    with pytest.raises(ValueError, match="non-negative"):
+        BackendTransportMetrics.from_untrusted({**valid, "event_count": -1})
+
+
 def test_soft_deadline_must_leave_one_fallback_timeout_of_reserve() -> None:
     with pytest.raises(ValueError, match="soft timeout must reserve"):
         Settings(
@@ -440,6 +527,7 @@ def test_v024_database_is_migrated_to_recovery_correct_provider_evidence(tmp_pat
             "transport_max_event_bytes",
             "transport_message_updates",
             "transport_snapshot_bytes",
+            "transport_partial_bytes",
             "transport_delta_bytes",
         } <= columns
     finally:
@@ -457,6 +545,7 @@ class MeasuredScriptedBackend(ScriptedBackend):
                 max_event_bytes=200,
                 message_update_count=7,
                 message_snapshot_bytes=700,
+                message_partial_bytes=650,
                 message_delta_bytes=70,
             ),
         )
@@ -493,6 +582,7 @@ async def test_engine_persists_content_free_transport_metrics(tmp_path) -> None:
         assert all(row["transport_max_event_bytes"] == 200 for row in rows)
         assert all(row["transport_message_updates"] == 7 for row in rows)
         assert all(row["transport_snapshot_bytes"] == 700 for row in rows)
+        assert all(row["transport_partial_bytes"] == 650 for row in rows)
         assert all(row["transport_delta_bytes"] == 70 for row in rows)
     finally:
         await engine.stop()
@@ -514,6 +604,7 @@ class MeasuredOutputLimitBackend:
                 max_event_bytes=65_536,
                 message_update_count=4300,
                 message_snapshot_bytes=63_000_000,
+                message_partial_bytes=62_000_000,
                 message_delta_bytes=150_000,
             ),
         )
@@ -524,7 +615,17 @@ async def test_failover_audit_persists_transport_metrics_on_typed_failure(tmp_pa
     path = tmp_path / "measured-failure.sqlite"
     repo = SQLiteRepository(str(path))
     repo.open()
-    fallback = SequenceBackend("fallback", "fallback-v1", [{"unexpected": True}])
+    fallback = SequenceBackend(
+        "fallback",
+        "fallback-v1",
+        [
+            BackendError(
+                "OUTPUT_LIMIT_EXCEEDED",
+                "final text exceeded byte limit",
+                audit_status="OUTPUT_LIMIT_FINAL_TEXT",
+            )
+        ],
+    )
     engine = ResearchEngine(
         repo,
         FailoverBackend(MeasuredOutputLimitBackend(), fallback),
@@ -541,9 +642,9 @@ async def test_failover_audit_persists_transport_metrics_on_typed_failure(tmp_pa
             await asyncio.sleep(0.01)
 
         assert job and job["state"] == "failed"
-        assert fallback.calls == 0
+        assert fallback.calls == 1
         rows = repo.provider_calls(job_id)
-        assert len(rows) == 1
+        assert len(rows) == 2
         assert rows[0]["output_status"] == "OUTPUT_LIMIT_RAW_TRANSPORT"
         assert rows[0]["error_code"] == "OUTPUT_LIMIT_EXCEEDED"
         assert rows[0]["transport_bytes"] == 64_000_123
@@ -551,6 +652,7 @@ async def test_failover_audit_persists_transport_metrics_on_typed_failure(tmp_pa
         assert rows[0]["transport_max_event_bytes"] == 65_536
         assert rows[0]["transport_message_updates"] == 4300
         assert rows[0]["transport_snapshot_bytes"] == 63_000_000
+        assert rows[0]["transport_partial_bytes"] == 62_000_000
         assert rows[0]["transport_delta_bytes"] == 150_000
     finally:
         await engine.stop()

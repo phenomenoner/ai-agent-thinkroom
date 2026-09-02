@@ -31,6 +31,7 @@ class BackendTransportMetrics:
     max_event_bytes: int = 0
     message_update_count: int = 0
     message_snapshot_bytes: int = 0
+    message_partial_bytes: int = 0
     message_delta_bytes: int = 0
 
     def __post_init__(self) -> None:
@@ -56,6 +57,7 @@ class BackendTransportMetrics:
             "transport_max_event_bytes": self.max_event_bytes,
             "transport_message_updates": self.message_update_count,
             "transport_snapshot_bytes": self.message_snapshot_bytes,
+            "transport_partial_bytes": self.message_partial_bytes,
             "transport_delta_bytes": self.message_delta_bytes,
         }
 

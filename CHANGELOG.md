@@ -20,7 +20,8 @@ All notable changes to Thinkroom are documented here.
 
 - Provider availability handling now shares a hard three-call budget across one fast same-route
   retry, one fallback, and one route-preserving schema repair. Timeouts skip same-route retry;
-  output-limit failures remain terminal and never amplify across providers.
+  semantic/result output-limit failures remain terminal. A primary raw-transport limit skips retry,
+  opens the attempt-local primary circuit, and may use the configured fallback once.
 - A persisted, attempt-local circuit skips new primary calls after one primary timeout or two fast
   transient failures, including producer-affine schema repair. HTTP 429 is retried within the call
   budget but does not open the circuit.

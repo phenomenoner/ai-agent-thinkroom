@@ -81,7 +81,7 @@ _SCHEMA_SQL = _SCHEMA_SQL_V024.replace(
     "effective_timeout_seconds REAL, error_code TEXT, transport_bytes INTEGER, "
     "transport_events INTEGER, transport_max_event_bytes INTEGER, "
     "transport_message_updates INTEGER, transport_snapshot_bytes INTEGER, "
-    "transport_delta_bytes INTEGER)",
+    "transport_partial_bytes INTEGER, transport_delta_bytes INTEGER)",
 )
 _MANAGED_TABLES = (
     "research_jobs",
@@ -219,6 +219,9 @@ class SQLiteRepository:
                     )
                     db.execute(
                         "ALTER TABLE provider_calls ADD COLUMN transport_snapshot_bytes INTEGER"
+                    )
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN transport_partial_bytes INTEGER"
                     )
                     db.execute(
                         "ALTER TABLE provider_calls ADD COLUMN transport_delta_bytes INTEGER"
@@ -555,7 +558,7 @@ class SQLiteRepository:
             "SELECT COALESCE(SUM(length(CAST(attempt_id AS BLOB)) + length(CAST(job_id AS BLOB)) + length(CAST(state AS BLOB)) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(outcome AS BLOB)),0) + COALESCE(length(CAST(recovery_reason AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + 8),0) n FROM attempts WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + COALESCE(length(CAST(attempt_id AS BLOB)),0) + COALESCE(length(CAST(from_state AS BLOB)),0) + length(CAST(to_state AS BLOB)) + length(CAST(at AS BLOB)) + COALESCE(length(CAST(reason AS BLOB)),0) + COALESCE(length(CAST(correlation_id AS BLOB)),0) + 8),0) n FROM state_transitions WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(kind AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + length(CAST(payload AS BLOB)) + COALESCE(length(CAST(state AS BLOB)),0) + COALESCE(length(CAST(error AS BLOB)),0) + 8),0) n FROM artifacts WHERE job_id=?",
-            "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(phase AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + COALESCE(length(CAST(prompt_version AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(output_status AS BLOB)),0) + COALESCE(length(CAST(route_role AS BLOB)),0) + COALESCE(length(CAST(error_code AS BLOB)),0) + 32),0) n FROM provider_calls WHERE job_id=?",
+            "SELECT COALESCE(SUM(length(CAST(job_id AS BLOB)) + length(CAST(attempt_id AS BLOB)) + length(CAST(phase AS BLOB)) + COALESCE(length(CAST(branch_id AS BLOB)),0) + COALESCE(length(CAST(prompt_version AS BLOB)),0) + COALESCE(length(CAST(backend AS BLOB)),0) + COALESCE(length(CAST(model AS BLOB)),0) + length(CAST(started_at AS BLOB)) + COALESCE(length(CAST(ended_at AS BLOB)),0) + COALESCE(length(CAST(output_status AS BLOB)),0) + COALESCE(length(CAST(route_role AS BLOB)),0) + COALESCE(length(CAST(error_code AS BLOB)),0) + 96),0) n FROM provider_calls WHERE job_id=?",
             "SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(CAST(request_hash AS BLOB)) + length(CAST(job_id AS BLOB))),0) n FROM idempotency_keys WHERE job_id=?",
         )
         return int(row["job_bytes"] or 0) + sum(

@@ -579,6 +579,7 @@ class PrimeAgentBackend:
                 "max_event_bytes": 0,
                 "message_update_count": 0,
                 "message_snapshot_bytes": 0,
+                "message_partial_bytes": 0,
                 "message_delta_bytes": 0,
             }
 
@@ -696,7 +697,17 @@ class PrimeAgentBackend:
                             transport_counters["message_snapshot_bytes"] += serialized_value_bytes(
                                 event["message"]
                             )
-                        if "delta" in event:
+                        assistant_event = event.get("assistantMessageEvent")
+                        if isinstance(assistant_event, dict):
+                            if "partial" in assistant_event:
+                                transport_counters["message_partial_bytes"] += (
+                                    serialized_value_bytes(assistant_event["partial"])
+                                )
+                            if "delta" in assistant_event:
+                                transport_counters["message_delta_bytes"] += serialized_value_bytes(
+                                    assistant_event["delta"]
+                                )
+                        elif "delta" in event:
                             transport_counters["message_delta_bytes"] += serialized_value_bytes(
                                 event["delta"]
                             )
@@ -1117,6 +1128,12 @@ class FailoverBackend:
         known = cls._TERMINAL_CODES | cls._FALLBACK_CODES | {"MALFORMED_PROVIDER_OUTPUT"}
         return code if code in known else "UNCLASSIFIED_ERROR"
 
+    @staticmethod
+    def _is_primary_raw_transport_limit(exc: BackendError) -> bool:
+        return (
+            exc.code == "OUTPUT_LIMIT_EXCEEDED" and exc.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
+        )
+
     def __init__(
         self,
         primary: RolloutBackend,
@@ -1336,7 +1353,10 @@ class FailoverBackend:
             if self._row_value(row, "route_role") != "primary":
                 continue
             code = self._row_value(row, "error_code")
-            if code == "BACKEND_TIMEOUT":
+            if code == "BACKEND_TIMEOUT" or (
+                code == "OUTPUT_LIMIT_EXCEEDED"
+                and self._row_value(row, "output_status") == "OUTPUT_LIMIT_RAW_TRANSPORT"
+            ):
                 score += 2
             elif code == "PROVIDER_ERROR":
                 duration = self._row_duration(row)
@@ -1424,6 +1444,8 @@ class FailoverBackend:
                 if audited_duration is not None:
                     primary_duration = audited_duration
             primary_error_code = exc.code
+            if self._is_primary_raw_transport_limit(exc):
+                return await call_fallback()
             if exc.code in self._TERMINAL_CODES or exc.code == "MALFORMED_PROVIDER_OUTPUT":
                 raise
             retryable = exc.code == "RATE_LIMITED" or (
@@ -1438,12 +1460,14 @@ class FailoverBackend:
                     calls_used -= 1
                 except BackendError as retry_exc:
                     primary_error_code = retry_exc.code
-                    if (
+                    if self._is_primary_raw_transport_limit(retry_exc):
+                        pass
+                    elif (
                         retry_exc.code in self._TERMINAL_CODES
                         or retry_exc.code == "MALFORMED_PROVIDER_OUTPUT"
                     ):
                         raise
-                    if retry_exc.code not in self._FALLBACK_CODES:
+                    elif retry_exc.code not in self._FALLBACK_CODES:
                         primary_error_code = "UNCLASSIFIED_ERROR"
             elif exc.code not in self._FALLBACK_CODES:
                 primary_error_code = "UNCLASSIFIED_ERROR"

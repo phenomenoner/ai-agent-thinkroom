@@ -64,6 +64,7 @@ class OutputLimitBackend:
                 max_event_bytes=456,
                 message_update_count=7,
                 message_snapshot_bytes=890,
+                message_partial_bytes=765,
                 message_delta_bytes=321,
             ),
         )
@@ -127,6 +128,7 @@ async def test_process_isolated_backend_preserves_safe_output_limit_audit_status
         max_event_bytes=456,
         message_update_count=7,
         message_snapshot_bytes=890,
+        message_partial_bytes=765,
         message_delta_bytes=321,
     )
     assert backend.active_process_count == 0

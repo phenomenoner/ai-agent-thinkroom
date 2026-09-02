@@ -235,7 +235,9 @@ export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 
 One fast provider failure can retry the same route once before fallback; a timeout skips that retry.
 All retry, fallback, and route-preserving schema repair work shares a three-call phase budget.
-`OUTPUT_LIMIT_EXCEEDED`, cancellation, fencing, and exhausted deadlines never amplify across routes.
+Cancellation, fencing, exhausted deadlines, and semantic/result output limits never amplify across
+routes. A primary raw-transport output limit is the sole exception: it never retries primary, opens
+the attempt-local primary circuit, and may use the configured fallback once within the same budget.
 Put API keys in a mode-0600 service environment file rather than in source, unit text, logs, or the
 database. See [Provider resilience and progress](docs/provider-resilience-v0.2.5.md) for the exact
 deadline, circuit, partial-result, and concurrency contract.
