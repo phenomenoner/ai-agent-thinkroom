@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from thinkroom import repository as repository_module
 from thinkroom.backends import FailoverBackend, ScriptedBackend
 from thinkroom.config import Settings
 from thinkroom.engine import ResearchEngine
@@ -491,6 +492,7 @@ def test_v025_deadline_and_concurrency_defaults_are_bounded() -> None:
 
 def test_transport_metrics_reject_unknown_or_nonnumeric_process_data() -> None:
     valid = BackendTransportMetrics().as_dict()
+    assert valid["accounted_transport_bytes"] == 0
     with pytest.raises(ValueError, match="shape"):
         BackendTransportMetrics.from_untrusted({**valid, "provider_text": "secret"})
     with pytest.raises(ValueError, match="non-negative"):
@@ -529,9 +531,59 @@ def test_v024_database_is_migrated_to_recovery_correct_provider_evidence(tmp_pat
             "transport_snapshot_bytes",
             "transport_partial_bytes",
             "transport_delta_bytes",
+            "transport_accounted_bytes",
         } <= columns
     finally:
         repo.close()
+
+
+def test_v025_database_is_migrated_to_accounted_transport_evidence(tmp_path) -> None:
+    path = tmp_path / "v025.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(repository_module._SCHEMA_SQL_V025)
+    db.close()
+
+    repo = SQLiteRepository(str(path))
+    repo.open()
+    try:
+        columns = {row["name"] for row in repo._db().execute("PRAGMA table_info(provider_calls)")}
+        assert "transport_accounted_bytes" in columns
+    finally:
+        repo.close()
+
+
+def test_versioned_migration_rolls_back_if_final_attestation_fails(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "interrupted-migration.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(repository_module._SCHEMA_SQL_V024)
+    db.close()
+    before = path.read_bytes()
+
+    repo = SQLiteRepository(str(path))
+    repo.open(prepare_schema=False)
+    original_attest = repo._attest_schema
+
+    def fail_final_attestation(
+        connection: sqlite3.Connection, *, allow_legacy: bool = False
+    ) -> str:
+        version = original_attest(connection, allow_legacy=allow_legacy)
+        if not allow_legacy:
+            raise RuntimeError("SIMULATED_FINAL_ATTESTATION_FAILURE")
+        return version
+
+    monkeypatch.setattr(repo, "_attest_schema", fail_final_attestation)
+    with pytest.raises(RuntimeError, match="SIMULATED_FINAL_ATTESTATION_FAILURE"):
+        repo.migrate()
+    repo.close()
+
+    check = sqlite3.connect(path)
+    try:
+        columns = {row[1] for row in check.execute("PRAGMA table_info(provider_calls)")}
+    finally:
+        check.close()
+    assert "route_role" not in columns
+    assert "transport_accounted_bytes" not in columns
+    assert path.read_bytes() == before
 
 
 class MeasuredScriptedBackend(ScriptedBackend):
@@ -541,6 +593,7 @@ class MeasuredScriptedBackend(ScriptedBackend):
             result,
             transport_metrics=BackendTransportMetrics(
                 raw_transport_bytes=1000,
+                accounted_transport_bytes=800,
                 event_count=10,
                 max_event_bytes=200,
                 message_update_count=7,
@@ -578,12 +631,65 @@ async def test_engine_persists_content_free_transport_metrics(tmp_path) -> None:
         rows = repo.provider_calls(job_id)
         assert rows
         assert all(row["transport_bytes"] == 1000 for row in rows)
+        assert all(row["transport_accounted_bytes"] == 800 for row in rows)
         assert all(row["transport_events"] == 10 for row in rows)
         assert all(row["transport_max_event_bytes"] == 200 for row in rows)
         assert all(row["transport_message_updates"] == 7 for row in rows)
         assert all(row["transport_snapshot_bytes"] == 700 for row in rows)
         assert all(row["transport_partial_bytes"] == 650 for row in rows)
         assert all(row["transport_delta_bytes"] == 70 for row in rows)
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+class MeasuredMalformedBackend:
+    name = "measured-malformed"
+    model = "measured-malformed-v1"
+
+    async def invoke(self, call: BackendRequestV1) -> dict[str, Any]:
+        return BackendResult(
+            {"schema_version": 1, "unexpected": "invalid-frame-shape"},
+            transport_metrics=BackendTransportMetrics(
+                raw_transport_bytes=901,
+                accounted_transport_bytes=333,
+                event_count=9,
+                max_event_bytes=201,
+                message_update_count=6,
+                message_snapshot_bytes=700,
+                message_partial_bytes=650,
+                message_delta_bytes=60,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_schema_invalid_result_retains_invocation_transport_metrics(tmp_path) -> None:
+    path = tmp_path / "measured-malformed.sqlite"
+    repo = SQLiteRepository(str(path))
+    repo.open()
+    engine = ResearchEngine(
+        repo,
+        MeasuredMalformedBackend(),
+        Settings(database_url=f"sqlite+aiosqlite:///{path}", max_concurrency=1),
+    )
+    try:
+        job_id, _ = await engine.submit(
+            ResearchRequest(question="Should schema-invalid results retain transport evidence?")
+        )
+        for _ in range(400):
+            job = repo.get_job(job_id)
+            if job and job["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+
+        assert job and job["state"] == "failed"
+        rows = repo.provider_calls(job_id)
+        assert len(rows) == 2
+        assert all(row["error_code"] == "MALFORMED_PROVIDER_OUTPUT" for row in rows)
+        assert all(row["transport_bytes"] == 901 for row in rows)
+        assert all(row["transport_accounted_bytes"] == 333 for row in rows)
+        assert all(row["transport_events"] == 9 for row in rows)
     finally:
         await engine.stop()
         repo.close()

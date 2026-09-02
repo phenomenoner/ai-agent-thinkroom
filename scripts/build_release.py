@@ -85,7 +85,7 @@ def _validate_wheel(path: Path) -> None:
             if len(metadata) != 1 or len(wheel) != 1 or len(records) != 1:
                 raise ValueError
             metadata_text = archive.read(metadata[0]).decode("utf-8")
-            if "Name: thinkroom\n" not in metadata_text or "Version: 0.2.5\n" not in metadata_text:
+            if "Name: thinkroom\n" not in metadata_text or "Version: 0.2.6\n" not in metadata_text:
                 raise ValueError
             rows = list(csv.reader(io.StringIO(archive.read(records[0]).decode("utf-8"))))
             record = {row[0]: row[1:] for row in rows if len(row) == 3}
@@ -115,7 +115,7 @@ def _validate_sdist(path: Path) -> None:
                 raise ValueError
             names = [member.name for member in members]
             roots = {Path(name).parts[0] for name in names if Path(name).parts}
-            if roots != {"thinkroom-0.2.5"}:
+            if roots != {"thinkroom-0.2.6"}:
                 raise ValueError
             if any(
                 name.startswith("/")
@@ -125,16 +125,16 @@ def _validate_sdist(path: Path) -> None:
             ):
                 raise ValueError
             required = {
-                "thinkroom-0.2.5/pyproject.toml",
-                "thinkroom-0.2.5/PKG-INFO",
+                "thinkroom-0.2.6/pyproject.toml",
+                "thinkroom-0.2.6/PKG-INFO",
             }
             if not required.issubset(names):
                 raise ValueError
-            pkg = archive.extractfile("thinkroom-0.2.5/PKG-INFO")
+            pkg = archive.extractfile("thinkroom-0.2.6/PKG-INFO")
             if pkg is None:
                 raise ValueError
             metadata = pkg.read().decode("utf-8")
-            if "Name: thinkroom\n" not in metadata or "Version: 0.2.5\n" not in metadata:
+            if "Name: thinkroom\n" not in metadata or "Version: 0.2.6\n" not in metadata:
                 raise ValueError
     except (OSError, UnicodeError, ValueError, tarfile.TarError) as exc:
         raise RuntimeError("invalid release artifact") from exc

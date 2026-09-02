@@ -287,11 +287,51 @@ def _validate_prime_argv_setting(
     return value
 
 
-_PRIME_RPC_RAW_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_EVENT_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_ACCOUNTED_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT = 512_000_000
+_PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES = 128
+_PRIME_RPC_ACCOUNTING_MAX_DEPTH = 64
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
 _PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT = 200_000
 _PRIME_CHILD_CLEANUP_MARKER_PREFIX = "THINKROOM_CHILD_CLEANED:"
 _PRIME_CHILD_ID_MARKER_PREFIX = "THINKROOM_CHILD_ID:"
+
+
+def _prime_rpc_accounted_event_bytes(event: dict[str, Any], raw_line_bytes: int) -> int:
+    """Measure one event after removing only repeated, non-authoritative snapshots."""
+    if event.get("type") != "message_update":
+        return max(_PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES, raw_line_bytes)
+    projection = dict(event)
+    projection.pop("message", None)
+    assistant_event = projection.get("assistantMessageEvent")
+    if isinstance(assistant_event, dict):
+        compact_assistant_event = dict(assistant_event)
+        compact_assistant_event.pop("partial", None)
+        projection["assistantMessageEvent"] = compact_assistant_event
+    pending: list[tuple[object, int]] = [(projection, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > _PRIME_RPC_ACCOUNTING_MAX_DEPTH:
+            raise BackendError(
+                "MALFORMED_PROVIDER_OUTPUT",
+                "Prime Agent RPC accounting projection exceeded nesting limit",
+            )
+        if isinstance(value, dict):
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
+    try:
+        projected_bytes = (
+            len(json.dumps(projection, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            + 1
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise BackendError(
+            "MALFORMED_PROVIDER_OUTPUT",
+            "Prime Agent RPC accounting projection was invalid",
+        ) from exc
+    return max(_PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES, projected_bytes)
 
 
 def _prime_child_cleanup_marker(child_name: str) -> str:
@@ -555,7 +595,7 @@ class PrimeAgentBackend:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=_PRIME_RPC_RAW_BYTE_LIMIT,
+                limit=_PRIME_RPC_EVENT_BYTE_LIMIT,
             )
             assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
             rpc_proc = proc
@@ -575,6 +615,7 @@ class PrimeAgentBackend:
 
             transport_counters = {
                 "raw_transport_bytes": 0,
+                "accounted_transport_bytes": 0,
                 "event_count": 0,
                 "max_event_bytes": 0,
                 "message_update_count": 0,
@@ -672,10 +713,13 @@ class PrimeAgentBackend:
                     transport_counters["max_event_bytes"] = max(
                         transport_counters["max_event_bytes"], line_bytes
                     )
-                    if transport_counters["raw_transport_bytes"] > _PRIME_RPC_RAW_BYTE_LIMIT:
+                    if (
+                        transport_counters["raw_transport_bytes"]
+                        > _PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT
+                    ):
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
-                            "Prime Agent RPC raw transport exceeded byte limit",
+                            "Prime Agent RPC raw transport exceeded absolute byte limit",
                             audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
                         )
                     try:
@@ -689,6 +733,18 @@ class PrimeAgentBackend:
                         raise BackendError(
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC event was not an object",
+                        )
+                    transport_counters["accounted_transport_bytes"] += (
+                        _prime_rpc_accounted_event_bytes(event, line_bytes)
+                    )
+                    if (
+                        transport_counters["accounted_transport_bytes"]
+                        > _PRIME_RPC_ACCOUNTED_BYTE_LIMIT
+                    ):
+                        raise BackendError(
+                            "OUTPUT_LIMIT_EXCEEDED",
+                            "Prime Agent RPC accounted transport exceeded byte limit",
+                            audit_status="OUTPUT_LIMIT_ACCOUNTED_TRANSPORT",
                         )
                     if event.get("type") == "message_update":
                         telemetry_event_count += 1

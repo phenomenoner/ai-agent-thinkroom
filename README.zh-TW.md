@@ -234,11 +234,14 @@ export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 
 只有在 provider error 於 fast-transient 門檻內結束時，才會在同一 route 重試一次；timeout
 會直接跳過重試。重試、fallback 與保留原 route 的 schema repair 共用每個 phase/branch 三次
-實體呼叫預算。取消、fencing、耗盡的 deadline 與 semantic/result output limit 都不會跨 route
-放大。唯一例外是 primary raw-transport output limit：它不重試 primary，會開啟 attempt-local
-primary circuit，並可在同一預算內使用一次已設定的 fallback。
+實體呼叫預算。取消、fencing、耗盡的 deadline，以及 semantic/result 或 accounted-transport
+output limit 都不會跨 route 放大。唯一例外是 primary 在 512 MB 絕對 wire ceiling 觸發的
+raw-transport output limit：它不重試 primary，會開啟 attempt-local primary circuit，並可在
+同一預算內使用一次已設定的 fallback。一般 64 MB transport budget 只折抵
+`message_update.message` 與 `assistantMessageEvent.partial` 的重複 snapshot；實際 raw wire bytes
+仍完整計量。
 完整 deadline、circuit、partial-result 與 concurrency contract 請見
-[Provider resilience and progress](docs/provider-resilience-v0.2.5.md)。
+[Provider resilience and progress](docs/provider-resilience-v0.2.6.md)。
 
 請先透過 [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) 的互動式 `/login`
 流程完成認證。Thinkroom 不會複製 OAuth 憑證；
@@ -264,7 +267,7 @@ process 完整 settle 後清除。
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.5-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.6-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 

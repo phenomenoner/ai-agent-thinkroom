@@ -57,9 +57,10 @@ class OutputLimitBackend:
         raise BackendError(
             "OUTPUT_LIMIT_EXCEEDED",
             "provider response exceeded byte limit",
-            audit_status="OUTPUT_LIMIT_FINAL_TEXT",
+            audit_status="OUTPUT_LIMIT_ACCOUNTED_TRANSPORT",
             transport_metrics=BackendTransportMetrics(
                 raw_transport_bytes=1234,
+                accounted_transport_bytes=987,
                 event_count=9,
                 max_event_bytes=456,
                 message_update_count=7,
@@ -121,9 +122,10 @@ async def test_process_isolated_backend_preserves_safe_output_limit_audit_status
         await backend.invoke(frame_request())
 
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
-    assert caught.value.audit_status == "OUTPUT_LIMIT_FINAL_TEXT"
+    assert caught.value.audit_status == "OUTPUT_LIMIT_ACCOUNTED_TRANSPORT"
     assert caught.value.transport_metrics == BackendTransportMetrics(
         raw_transport_bytes=1234,
+        accounted_transport_bytes=987,
         event_count=9,
         max_event_bytes=456,
         message_update_count=7,

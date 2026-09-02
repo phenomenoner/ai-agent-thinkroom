@@ -1,11 +1,11 @@
 {
   "schema_version": "1",
-  "bundle_version": "0.2.5",
-  "product_version": "0.2.5",
+  "bundle_version": "0.2.6",
+  "product_version": "0.2.6",
   "entries": [
     {
       "path": "thinkroom-install/SKILL.md",
-      "sha256": "0f252d8185d9fbb1fde5983f4f5c6c0ea05206da961af6ac4d477eb5f4ea0445"
+      "sha256": "e2c1575a1f54c17435ee88f9e8e623569609639d9324b0266915f8c9ed3ee59e"
     },
     {
       "path": "thinkroom-install/agents/openai.yaml",
@@ -13,7 +13,7 @@
     },
     {
       "path": "thinkroom-operate/SKILL.md",
-      "sha256": "dbf13983c03e11944ff54d0170ac73bcfe4f568108afc2dffb204049f8d138aa"
+      "sha256": "045ef7c1158234d345fbe8b1a6fe039c55c0a82c16e84b01280aa52ec247c091"
     },
     {
       "path": "thinkroom-operate/agents/openai.yaml",
@@ -21,7 +21,7 @@
     },
     {
       "path": "thinkroom-trigger/SKILL.md",
-      "sha256": "25a5fb2e127028fae94a2c93d4ea1f9de451dec108b6b3ea82ac8e4d86d1091a"
+      "sha256": "ecf9c1bd205d6e2b494251bc7000467819b7975a454c6a769a31ea2c5a3cb11f"
     },
     {
       "path": "thinkroom-trigger/agents/openai.yaml",

@@ -3,7 +3,7 @@ name: thinkroom-operate
 description: Operate Thinkroom research jobs
 license: MIT
 metadata:
-  version: "0.2.5"
+  version: "0.2.6"
   author: "CK, Martin (Hermes Agent)"
   platforms: "linux"
   tags: "thinkroom, research, operations"

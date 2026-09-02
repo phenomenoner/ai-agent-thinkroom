@@ -1,6 +1,6 @@
 [project]
 name = "thinkroom"
-version = "0.2.5"
+version = "0.2.6"
 description = "Evidence-linked multi-perspective AI research for consequential questions"
 readme = "README.md"
 license = { file = "LICENSE" }

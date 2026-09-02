@@ -2477,7 +2477,7 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
         "sys.stdin.read()\n"
     )
     executable.chmod(0o755)
-    monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1024)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT", 1024)
     request = BackendRequestV1(
         phase="frame",
         job_id="j",
@@ -2511,6 +2511,214 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
     assert metrics.message_snapshot_bytes >= 128
     assert metrics.message_partial_bytes >= 128
     assert metrics.message_delta_bytes >= 32
+
+
+def test_prime_transport_accounting_defaults_are_pinned() -> None:
+    from thinkroom import backends as backend_module
+
+    assert backend_module._PRIME_RPC_EVENT_BYTE_LIMIT == 64_000_000
+    assert backend_module._PRIME_RPC_ACCOUNTED_BYTE_LIMIT == 64_000_000
+    assert backend_module._PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT == 512_000_000
+    assert backend_module._PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES == 128
+    assert backend_module._PRIME_RPC_ACCOUNTING_MAX_DEPTH == 64
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_bounds_nondiscounted_accounted_transport(tmp_path, monkeypatch):
+    from thinkroom import backends as backend_module
+
+    pid_file = tmp_path / "accounted-overflow.pid"
+    executable = tmp_path / "prime-accounted-overflow"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid()))\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "print(json.dumps({'type': 'message_update', 'message': {'content': 'discounted'}, "
+        "'message_v2': {'content': 'x' * 512}}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PID_FILE", str(pid_file))
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_ACCOUNTED_BYTE_LIMIT", 256)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT", 10_000)
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    with pytest.raises(BackendError) as caught:
+        await PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=4096).invoke(
+            request
+        )
+
+    assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
+    assert caught.value.audit_status == "OUTPUT_LIMIT_ACCOUNTED_TRANSPORT"
+    metrics = caught.value.transport_metrics
+    assert metrics is not None
+    assert metrics.accounted_transport_bytes > 256
+    assert metrics.raw_transport_bytes < 10_000
+    pid = int(pid_file.read_text())
+    for _ in range(100):
+        if not Path(f"/proc/{pid}").exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.asyncio
+async def test_prime_backend_accounts_compact_projection_without_trusting_telemetry(
+    tmp_path, monkeypatch
+):
+    from thinkroom import backends as backend_module
+
+    executable = tmp_path / "prime-cumulative-telemetry"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "command = json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'id': command.get('id'), 'type': 'response', 'command': 'prompt', "
+        "'success': True}), flush=True)\n"
+        "for size in range(256, 4097, 256):\n"
+        "    partial = {'role': 'assistant', 'content': "
+        "[{'type': 'text', 'text': 'x' * size}]}\n"
+        "    print(json.dumps({'type': 'message_update', 'message': partial, "
+        "'assistantMessageEvent': {'type': 'text_delta', 'contentIndex': 0, "
+        "'delta': 'y', 'partial': partial}}), flush=True)\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'custom', "
+        "'customType': 'agent_message', 'details': {'message': 'child done', "
+        "'fromRelationship': 'child', 'from': {'sessionName': 'thinkroom-frame-worker'}}}}), "
+        "flush=True)\n"
+        "cleanup = command['message'].split('```python\\n', 1)[1].split('\\n```', 1)[0]\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'args': {'code': cleanup}}), flush=True)\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolName': 'ipython', "
+        "'toolCallId': 'cleanup-1', 'isError': False, "
+        "'result': 'THINKROOM_CHILD_CLEANED:thinkroom-frame-worker'}), flush=True)\n"
+        "result = json.dumps({'schema_version':1,'decision':'d','scope':'s','constraints':['c'],"
+        "'success_criteria':['s'],'ambiguities':['a'],'research_questions':['q']})\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [{'type': 'text', 'text': result}], 'stopReason': 'stop'}}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_end', 'messages': ["
+        "{'role': 'custom', 'customType': 'agent_message', 'content': 'child done', "
+        "'details': {'message': 'child done', 'fromRelationship': 'child', "
+        "'from': {'sessionName': 'thinkroom-frame-worker'}}},"
+        "{'role': 'assistant', 'content': [{'type': 'text', 'text': result}], "
+        "'stopReason': 'stop'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_ACCOUNTED_BYTE_LIMIT", 8_000, raising=False)
+    monkeypatch.setattr(
+        backend_module, "_PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT", 100_000, raising=False
+    )
+    request = BackendRequestV1(
+        phase="frame",
+        job_id="j",
+        attempt_id="a",
+        prompt_version="v",
+        input=FrameInputV1(
+            question="A sufficiently important question",
+            domain="generic",
+            guidance="g",
+            safety="s",
+        ),
+        expected_output_schema="FrameOutputV1",
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        correlation_id="c",
+    )
+
+    accepted = await PrimeAgentBackend(
+        str(executable), "", "", "off", max_response_bytes=4096
+    ).invoke(request)
+
+    assert accepted["decision"] == "d"
+    metrics = accepted.transport_metrics
+    assert metrics is not None
+    assert metrics.raw_transport_bytes > 8_000
+    assert metrics.accounted_transport_bytes < 8_000
+    assert metrics.accounted_transport_bytes <= metrics.raw_transport_bytes
+
+
+def test_prime_accounting_projection_discounts_only_exact_snapshot_fields() -> None:
+    from thinkroom import backends as backend_module
+
+    event = {
+        "type": "message_update",
+        "message": {"content": "x" * 1000},
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "d",
+            "partial": {"content": "x" * 1000},
+            "partialText": "must-be-charged",
+        },
+        "message_v2": {"content": "must-also-be-charged"},
+    }
+    raw_bytes = (
+        len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
+    )
+    projection = {
+        "type": "message_update",
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "d",
+            "partialText": "must-be-charged",
+        },
+        "message_v2": {"content": "must-also-be-charged"},
+    }
+    expected = max(
+        128,
+        len(json.dumps(projection, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1,
+    )
+
+    assert backend_module._prime_rpc_accounted_event_bytes(event, raw_bytes) == expected
+    assert expected < raw_bytes
+    assert (
+        backend_module._prime_rpc_accounted_event_bytes(
+            {"type": "unknown", "message": {"content": "x" * 1000}}, raw_bytes
+        )
+        == raw_bytes
+    )
+    assert backend_module._prime_rpc_accounted_event_bytes({"type": "message_update"}, 27) == 128
+    assert backend_module._prime_rpc_accounted_event_bytes({"type": "unknown"}, 27) == 128
+
+
+def test_prime_accounting_projection_rejects_unbounded_nested_shape_as_typed_error() -> None:
+    from thinkroom import backends as backend_module
+
+    nested: list[object] = []
+    cursor = nested
+    for _ in range(2_000):
+        child: list[object] = []
+        cursor.append(child)
+        cursor = child
+    event = {"type": "message_update", "renamed_snapshot": nested}
+
+    with pytest.raises(BackendError) as caught:
+        backend_module._prime_rpc_accounted_event_bytes(event, 10_000)
+    assert caught.value.code == "MALFORMED_PROVIDER_OUTPUT"
+
+
+def test_v026_resilience_contract_is_present() -> None:
+    root = Path(__file__).parents[1]
+    contract = root / "docs/provider-resilience-v0.2.6.md"
+    assert contract.is_file()
+    text = contract.read_text()
+    assert "OUTPUT_LIMIT_ACCOUNTED_TRANSPORT" in text
+    assert "512,000,000" in text
 
 
 @pytest.mark.asyncio
@@ -2555,7 +2763,7 @@ async def test_prime_backend_enforces_raw_rpc_event_count_and_settles_process(
     )
     executable.chmod(0o755)
     monkeypatch.setenv("PID_FILE", str(pid_file))
-    monkeypatch.setattr(backend_module, "_PRIME_RPC_RAW_BYTE_LIMIT", 1_000_000)
+    monkeypatch.setattr(backend_module, "_PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT", 1_000_000)
     monkeypatch.setattr(backend_module, "_PRIME_RPC_EVENT_COUNT_LIMIT", 7)
     monkeypatch.setattr(backend_module, "_PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT", 2)
     request = BackendRequestV1(
@@ -5153,13 +5361,16 @@ def test_engine_has_no_process_infrastructure_composition_dependency():
     assert "isolate_backend" not in source
 
 
-def test_normative_migration_policy_is_single_and_fail_closed():
+def test_normative_migration_policy_is_versioned_and_fail_closed():
     root = Path(__file__).parents[1]
     specification = (root / "docs/specification.md").read_text()
     operations = (root / "docs/OPERATIONS.md").read_text()
-    contract = "Only the exact canonical v0.2.4 provider-call schema may migrate to v0.2.5"
-    assert contract in specification
-    assert contract in operations
+    v024_contract = "The exact canonical v0.2.4 provider-call schema may migrate to v0.2.5"
+    v025_contract = "exact canonical v0.2.5 schema may migrate to v0.2.6"
+    assert v024_contract in specification
+    assert v024_contract in operations
+    assert v025_contract in specification
+    assert v025_contract in operations
     assert "Any other existing noncanonical or prerelease schema is rejected" in specification
 
 
@@ -5310,17 +5521,17 @@ def _seed_profiled_skills(target: Path, version: str) -> None:
     }
     current_metadata = {
         "thinkroom-install/SKILL.md": (
-            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            'license: MIT\nmetadata:\n  version: "0.2.6"\n'
             '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
             '  tags: "thinkroom, research, installation"'
         ),
         "thinkroom-trigger/SKILL.md": (
-            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            'license: MIT\nmetadata:\n  version: "0.2.6"\n'
             '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
             '  tags: "thinkroom, research, decision-support"'
         ),
         "thinkroom-operate/SKILL.md": (
-            'license: MIT\nmetadata:\n  version: "0.2.5"\n'
+            'license: MIT\nmetadata:\n  version: "0.2.6"\n'
             '  author: "CK, Martin (Hermes Agent)"\n  platforms: "linux"\n'
             '  tags: "thinkroom, research, operations"'
         ),
@@ -5411,7 +5622,7 @@ def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     assert install(target) == planned
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
     receipt = json.loads((target / ".thinkroom/skills-receipt-v1.json").read_text())
-    assert receipt["bundle_version"] == "0.2.5"
+    assert receipt["bundle_version"] == "0.2.6"
     assert len(receipt["files"]) == 6
 
 

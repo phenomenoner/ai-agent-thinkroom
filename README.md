@@ -235,11 +235,14 @@ export THINKROOM_JOB_TIMEOUT_SECONDS=1200
 
 One fast provider failure can retry the same route once before fallback; a timeout skips that retry.
 All retry, fallback, and route-preserving schema repair work shares a three-call phase budget.
-Cancellation, fencing, exhausted deadlines, and semantic/result output limits never amplify across
-routes. A primary raw-transport output limit is the sole exception: it never retries primary, opens
-the attempt-local primary circuit, and may use the configured fallback once within the same budget.
+Cancellation, fencing, exhausted deadlines, and semantic/result or accounted-transport output
+limits never amplify across routes. A primary absolute raw-transport output limit is the sole
+exception: it never retries primary, opens the attempt-local primary circuit, and may use the
+configured fallback once within the same budget. Prime RPC still records exact raw wire bytes, but
+its ordinary 64 MB transport budget discounts only the repeated `message_update.message` and
+`assistantMessageEvent.partial` snapshots; a separate 512 MB raw ceiling remains fail-closed.
 Put API keys in a mode-0600 service environment file rather than in source, unit text, logs, or the
-database. See [Provider resilience and progress](docs/provider-resilience-v0.2.5.md) for the exact
+database. See [Provider resilience and progress](docs/provider-resilience-v0.2.6.md) for the exact
 deadline, circuit, partial-result, and concurrency contract.
 
 Authenticate that [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) installation first
@@ -269,7 +272,7 @@ For the release-authorized production path, download the wheel, `requirements-pr
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python --require-hashes -r requirements-production.txt
-uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.5-py3-none-any.whl
+uv pip install --python .venv/bin/python --no-deps thinkroom-0.2.6-py3-none-any.whl
 .venv/bin/python verify_locked_runtime.py uv.lock --write-manifest runtime-lock-manifest.json
 ```
 

@@ -75,13 +75,17 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (key TEXT PRIMARY KEY, request_hash 
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON research_jobs(created_at DESC, job_id DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON research_jobs(state, created_at);
 """
-_SCHEMA_SQL = _SCHEMA_SQL_V024.replace(
+_SCHEMA_SQL_V025 = _SCHEMA_SQL_V024.replace(
     "output_status TEXT, output_size INTEGER)",
     "output_status TEXT, output_size INTEGER, route_role TEXT, "
     "effective_timeout_seconds REAL, error_code TEXT, transport_bytes INTEGER, "
     "transport_events INTEGER, transport_max_event_bytes INTEGER, "
     "transport_message_updates INTEGER, transport_snapshot_bytes INTEGER, "
     "transport_partial_bytes INTEGER, transport_delta_bytes INTEGER)",
+)
+_SCHEMA_SQL = _SCHEMA_SQL_V025.replace(
+    "transport_delta_bytes INTEGER)",
+    "transport_delta_bytes INTEGER, transport_accounted_bytes INTEGER)",
 )
 _MANAGED_TABLES = (
     "research_jobs",
@@ -197,39 +201,52 @@ class SQLiteRepository:
 
     def migrate(self) -> None:
         db = self._db()
-        with self.lock, db:
-            existing = db.execute(
-                "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
-            ).fetchone()
-            if existing is not None:
-                schema = self._attest_schema(db, allow_legacy=True)
-                if schema == "v0.2.4":
-                    db.execute("ALTER TABLE provider_calls ADD COLUMN route_role TEXT")
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN effective_timeout_seconds REAL"
-                    )
-                    db.execute("ALTER TABLE provider_calls ADD COLUMN error_code TEXT")
-                    db.execute("ALTER TABLE provider_calls ADD COLUMN transport_bytes INTEGER")
-                    db.execute("ALTER TABLE provider_calls ADD COLUMN transport_events INTEGER")
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN transport_max_event_bytes INTEGER"
-                    )
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN transport_message_updates INTEGER"
-                    )
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN transport_snapshot_bytes INTEGER"
-                    )
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN transport_partial_bytes INTEGER"
-                    )
-                    db.execute(
-                        "ALTER TABLE provider_calls ADD COLUMN transport_delta_bytes INTEGER"
-                    )
-                    self._attest_schema(db)
-                return
-            db.executescript(_SCHEMA_SQL)
-            self._attest_schema(db)
+        with self.lock:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                existing = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
+                ).fetchone()
+                if existing is not None:
+                    schema = self._attest_schema(db, allow_legacy=True)
+                    if schema == "v0.2.4":
+                        db.execute("ALTER TABLE provider_calls ADD COLUMN route_role TEXT")
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN effective_timeout_seconds REAL"
+                        )
+                        db.execute("ALTER TABLE provider_calls ADD COLUMN error_code TEXT")
+                        db.execute("ALTER TABLE provider_calls ADD COLUMN transport_bytes INTEGER")
+                        db.execute("ALTER TABLE provider_calls ADD COLUMN transport_events INTEGER")
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_max_event_bytes INTEGER"
+                        )
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_message_updates INTEGER"
+                        )
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_snapshot_bytes INTEGER"
+                        )
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_partial_bytes INTEGER"
+                        )
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_delta_bytes INTEGER"
+                        )
+                        schema = "v0.2.5"
+                    if schema == "v0.2.5":
+                        db.execute(
+                            "ALTER TABLE provider_calls ADD COLUMN transport_accounted_bytes INTEGER"
+                        )
+                else:
+                    for statement in _SCHEMA_SQL.split(";"):
+                        if sql := statement.strip():
+                            db.execute(sql)
+                self._attest_schema(db)
+                db.commit()
+            except BaseException:
+                if db.in_transaction:
+                    db.rollback()
+                raise
 
     @staticmethod
     def _schema_shape(db: sqlite3.Connection) -> dict[str, object]:
@@ -306,8 +323,9 @@ class SQLiteRepository:
     @classmethod
     def _attest_schema(cls, db: sqlite3.Connection, *, allow_legacy: bool = False) -> str:
         actual_shape = cls._schema_shape(db)
-        candidates = [("v0.2.5", _SCHEMA_SQL)]
+        candidates = [("v0.2.6", _SCHEMA_SQL)]
         if allow_legacy:
+            candidates.append(("v0.2.5", _SCHEMA_SQL_V025))
             candidates.append(("v0.2.4", _SCHEMA_SQL_V024))
         for version, schema_sql in candidates:
             expected = sqlite3.connect(":memory:")

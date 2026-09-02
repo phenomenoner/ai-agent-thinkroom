@@ -1126,6 +1126,7 @@ class ResearchEngine:
             call_id_box: list[int | None] = [None]
             call_id: int | None = None
             output_size = 0
+            transport_metrics: BackendTransportMetrics | None = None
             try:
                 serialized_input = json.dumps(
                     provider_payload(request), ensure_ascii=False, separators=(",", ":")
@@ -1248,6 +1249,8 @@ class ResearchEngine:
                 output_status = exc.audit_status if type(exc) is BackendError else safe_status
                 if final_call_id is not None and not call_settled:
                     error_transport_metrics = getattr(exc, "transport_metrics", None)
+                    if type(error_transport_metrics) is not BackendTransportMetrics:
+                        error_transport_metrics = transport_metrics
                     self.repo.finish_provider_call(
                         final_call_id,
                         aid,

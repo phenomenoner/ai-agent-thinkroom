@@ -2,7 +2,19 @@
 
 All notable changes to Thinkroom are documented here.
 
-## Unreleased
+## 0.2.6 — Unreleased
+
+### Fixed
+
+- Prime RPC now accounts repeated cumulative `message_update` snapshots through a narrowly
+  allowlisted projection while retaining an independent absolute raw-wire ceiling. This prevents
+  non-authoritative telemetry amplification from exhausting the ordinary transport budget without
+  weakening lifecycle, custody, ordering, event-count, timeout, or terminal-output checks.
+- Provider-call audit rows preserve content-free transport metrics when an otherwise successful
+  Prime result fails phase-schema validation, improving diagnosis of malformed provider output.
+- Exact canonical v0.2.5 SQLite databases can migrate to v0.2.6 by adding the accounted-transport
+  counter; earlier v0.2.4 databases retain the existing sequential migration path, with the complete
+  DDL chain and final attestation committed or rolled back as one transaction.
 
 ## 0.2.5 — 2026-09-01
 

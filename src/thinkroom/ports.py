@@ -27,6 +27,7 @@ class BackendTransportMetrics:
     """Content-free numeric evidence for one provider transport."""
 
     raw_transport_bytes: int = 0
+    accounted_transport_bytes: int = 0
     event_count: int = 0
     max_event_bytes: int = 0
     message_update_count: int = 0
@@ -53,6 +54,7 @@ class BackendTransportMetrics:
     def repository_values(self) -> dict[str, int]:
         return {
             "transport_bytes": self.raw_transport_bytes,
+            "transport_accounted_bytes": self.accounted_transport_bytes,
             "transport_events": self.event_count,
             "transport_max_event_bytes": self.max_event_bytes,
             "transport_message_updates": self.message_update_count,
