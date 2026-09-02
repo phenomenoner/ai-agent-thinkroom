@@ -13,6 +13,8 @@ All notable changes to Thinkroom are documented here.
   active, slow, degraded, stalled, and presumed-dead classifications.
 - Jobs preserve a typed partial-evidence artifact when the soft deadline prevents queued phases or
   rollout branches from starting. Partial evidence is explicitly not a completed synthesis.
+- Prime RPC provider-call evidence includes content-free byte and event counters on success and
+  typed failure so operators can distinguish transport amplification without retaining model text.
 
 ### Changed
 
@@ -20,11 +22,13 @@ All notable changes to Thinkroom are documented here.
   retry, one fallback, and one route-preserving schema repair. Timeouts skip same-route retry;
   output-limit failures remain terminal and never amplify across providers.
 - A persisted, attempt-local circuit skips new primary calls after one primary timeout or two fast
-  transient failures. HTTP 429 is retried within the call budget but does not open the circuit.
+  transient failures, including producer-affine schema repair. HTTP 429 is retried within the call
+  budget but does not open the circuit.
 - Independent rollout-call concurrency is configurable from one through two and remains one by
   default. Non-rollout phases and the default active-job limit remain one.
 - Existing canonical v0.2.4 SQLite databases are migrated in place with route role, effective
-  timeout, and normalized error-code evidence needed for recovery-correct progress and routing.
+  timeout, normalized error-code evidence, and content-free Prime RPC transport counters needed for
+  recovery-correct progress, routing, and output-volume diagnosis.
 
 ## 0.2.4 — 2026-09-01
 

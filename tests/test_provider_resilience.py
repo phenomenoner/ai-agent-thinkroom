@@ -12,7 +12,7 @@ import pytest
 from thinkroom.backends import FailoverBackend, ScriptedBackend
 from thinkroom.config import Settings
 from thinkroom.engine import ResearchEngine
-from thinkroom.ports import BackendError
+from thinkroom.ports import BackendError, BackendResult, BackendTransportMetrics
 from thinkroom.progress import derive_research_progress
 from thinkroom.repository import _SCHEMA_SQL_V024, SQLiteRepository
 from thinkroom.schemas import (
@@ -292,6 +292,47 @@ async def test_fallback_schema_repair_stays_on_fallback_and_is_third_call() -> N
 
 
 @pytest.mark.asyncio
+async def test_primary_schema_repair_respects_open_attempt_circuit() -> None:
+    primary = SequenceBackend("primary", "p", [{"unexpected": True}])
+    fallback = SequenceBackend("fallback", "f", [{"unexpected": True}])
+    audit = PersistentAudit()
+    backend = FailoverBackend(primary, fallback, retry_delay_seconds=(0, 0))
+
+    for branch_id in ("failed-a", "failed-b"):
+        failed = request(branch_id=branch_id)
+        call_id = audit.start(
+            failed,
+            "primary",
+            "p",
+            route_role="primary",
+            effective_timeout_seconds=90,
+        )
+        audit.finish(call_id, failed, "PROVIDER_ERROR", error_code="PROVIDER_ERROR")
+
+    repair = request(branch_id="repair")
+    malformed_id = audit.start(
+        repair,
+        "primary",
+        "p",
+        route_role="primary",
+        effective_timeout_seconds=90,
+    )
+    audit.finish(
+        malformed_id,
+        repair,
+        "MALFORMED_PROVIDER_OUTPUT",
+        error_code="MALFORMED_PROVIDER_OUTPUT",
+    )
+
+    with pytest.raises(BackendError) as raised:
+        await backend.invoke_with_audit(repair, audit)
+
+    assert raised.value.code == "MALFORMED_PROVIDER_OUTPUT"
+    assert (primary.calls, fallback.calls) == (0, 0)
+    assert len(audit.rows) == 3
+
+
+@pytest.mark.asyncio
 async def test_output_limit_never_retries_or_falls_back() -> None:
     primary = SequenceBackend("primary", "p", [BackendError("OUTPUT_LIMIT_EXCEEDED", "too large")])
     fallback = SequenceBackend("fallback", "f", [{"unexpected": True}])
@@ -394,8 +435,125 @@ def test_v024_database_is_migrated_to_recovery_correct_provider_evidence(tmp_pat
             "route_role",
             "effective_timeout_seconds",
             "error_code",
+            "transport_bytes",
+            "transport_events",
+            "transport_max_event_bytes",
+            "transport_message_updates",
+            "transport_snapshot_bytes",
+            "transport_delta_bytes",
         } <= columns
     finally:
+        repo.close()
+
+
+class MeasuredScriptedBackend(ScriptedBackend):
+    async def invoke(self, call: BackendRequestV1) -> dict[str, Any]:
+        result = await super().invoke(call)
+        return BackendResult(
+            result,
+            transport_metrics=BackendTransportMetrics(
+                raw_transport_bytes=1000,
+                event_count=10,
+                max_event_bytes=200,
+                message_update_count=7,
+                message_snapshot_bytes=700,
+                message_delta_bytes=70,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_engine_persists_content_free_transport_metrics(tmp_path) -> None:
+    path = tmp_path / "measured.sqlite"
+    repo = SQLiteRepository(str(path))
+    repo.open()
+    engine = ResearchEngine(
+        repo,
+        MeasuredScriptedBackend(),
+        Settings(database_url=f"sqlite+aiosqlite:///{path}", max_concurrency=1),
+    )
+    try:
+        job_id, _ = await engine.submit(
+            ResearchRequest(
+                question="Should content-free transport evidence survive provider settlement?",
+                branch_count=2,
+            )
+        )
+        for _ in range(400):
+            job = repo.get_job(job_id)
+            if job and job["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+
+        assert job and job["state"] == "succeeded"
+        rows = repo.provider_calls(job_id)
+        assert rows
+        assert all(row["transport_bytes"] == 1000 for row in rows)
+        assert all(row["transport_events"] == 10 for row in rows)
+        assert all(row["transport_max_event_bytes"] == 200 for row in rows)
+        assert all(row["transport_message_updates"] == 7 for row in rows)
+        assert all(row["transport_snapshot_bytes"] == 700 for row in rows)
+        assert all(row["transport_delta_bytes"] == 70 for row in rows)
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+class MeasuredOutputLimitBackend:
+    name = "measured-primary"
+    model = "measured-v1"
+
+    async def invoke(self, call: BackendRequestV1) -> dict[str, Any]:
+        raise BackendError(
+            "OUTPUT_LIMIT_EXCEEDED",
+            "raw transport exceeded byte limit",
+            audit_status="OUTPUT_LIMIT_RAW_TRANSPORT",
+            transport_metrics=BackendTransportMetrics(
+                raw_transport_bytes=64_000_123,
+                event_count=4321,
+                max_event_bytes=65_536,
+                message_update_count=4300,
+                message_snapshot_bytes=63_000_000,
+                message_delta_bytes=150_000,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_failover_audit_persists_transport_metrics_on_typed_failure(tmp_path) -> None:
+    path = tmp_path / "measured-failure.sqlite"
+    repo = SQLiteRepository(str(path))
+    repo.open()
+    fallback = SequenceBackend("fallback", "fallback-v1", [{"unexpected": True}])
+    engine = ResearchEngine(
+        repo,
+        FailoverBackend(MeasuredOutputLimitBackend(), fallback),
+        Settings(database_url=f"sqlite+aiosqlite:///{path}", max_concurrency=1),
+    )
+    try:
+        job_id, _ = await engine.submit(
+            ResearchRequest(question="Should typed output-limit evidence remain measurable?")
+        )
+        for _ in range(400):
+            job = repo.get_job(job_id)
+            if job and job["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+
+        assert job and job["state"] == "failed"
+        assert fallback.calls == 0
+        rows = repo.provider_calls(job_id)
+        assert len(rows) == 1
+        assert rows[0]["output_status"] == "OUTPUT_LIMIT_RAW_TRANSPORT"
+        assert rows[0]["error_code"] == "OUTPUT_LIMIT_EXCEEDED"
+        assert rows[0]["transport_bytes"] == 64_000_123
+        assert rows[0]["transport_events"] == 4321
+        assert rows[0]["transport_max_event_bytes"] == 65_536
+        assert rows[0]["transport_message_updates"] == 4300
+        assert rows[0]["transport_snapshot_bytes"] == 63_000_000
+        assert rows[0]["transport_delta_bytes"] == 150_000
+    finally:
+        await engine.stop()
         repo.close()
 
 

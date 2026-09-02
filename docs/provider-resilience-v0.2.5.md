@@ -46,8 +46,19 @@ attempt. It prevents new primary calls but does not cancel a primary call alread
 attempt starts with a fresh score.
 
 Each provider-call record stores its route role, effective timeout, normalized error code, start/end
-times, attempt fence, and monotonic database id. An unfinished call past its persisted timeout plus a
-small observation grace is `PRESUMED_DEAD`, never active.
+times, attempt fence, and monotonic database id. Every primary-route invocation, including a
+producer-affine schema repair, passes through the same attempt-local circuit admission lock and
+persisted-score recheck. If that repair is no longer admissible, it remains
+`MALFORMED_PROVIDER_OUTPUT`; it is neither started on primary nor rerouted to fallback. An unfinished
+call past its persisted timeout plus a small observation grace is `PRESUMED_DEAD`, never active.
+
+Prime RPC calls also settle six content-free transport counters: total raw bytes, total JSONL event
+count, largest event bytes, `message_update` count, cumulative serialized message-snapshot bytes, and
+cumulative serialized delta bytes. Counters are non-negative integers and contain no prompt,
+response, event, error, or provider text. They are captured on both success and typed backend error,
+survive process isolation, and remain optional for backends that cannot report them. These counters
+diagnose producer-side amplification; they do not relax any event, byte, deadline, or validation
+limit and do not make partial JSON acceptable.
 
 ## Derived progress
 

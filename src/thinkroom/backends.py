@@ -18,6 +18,8 @@ import httpx
 
 from .ports import (
     BackendError,
+    BackendResult,
+    BackendTransportMetrics,
     ProviderInvocationAudit,
     RolloutBackend,
     backend_input,
@@ -571,10 +573,26 @@ class PrimeAgentBackend:
             rpc_stdin.write(command)
             await rpc_stdin.drain()
 
+            transport_counters = {
+                "raw_transport_bytes": 0,
+                "event_count": 0,
+                "max_event_bytes": 0,
+                "message_update_count": 0,
+                "message_snapshot_bytes": 0,
+                "message_delta_bytes": 0,
+            }
+
+            def transport_metrics() -> BackendTransportMetrics:
+                return BackendTransportMetrics(**transport_counters)
+
+            def serialized_value_bytes(value: object) -> int:
+                return len(
+                    json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                )
+
             async def run_rpc() -> dict[str, Any]:
-                raw_transport_bytes = 0
                 control_event_bytes = 0
-                event_count = 0
+                semantic_event_count = 0
                 telemetry_event_count = 0
                 prompt_accepted = False
                 child_message_received = False
@@ -647,8 +665,13 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC ended before an RLM-backed result",
                         )
-                    raw_transport_bytes += len(line)
-                    if raw_transport_bytes > _PRIME_RPC_RAW_BYTE_LIMIT:
+                    line_bytes = len(line)
+                    transport_counters["raw_transport_bytes"] += line_bytes
+                    transport_counters["event_count"] += 1
+                    transport_counters["max_event_bytes"] = max(
+                        transport_counters["max_event_bytes"], line_bytes
+                    )
+                    if transport_counters["raw_transport_bytes"] > _PRIME_RPC_RAW_BYTE_LIMIT:
                         raise BackendError(
                             "OUTPUT_LIMIT_EXCEEDED",
                             "Prime Agent RPC raw transport exceeded byte limit",
@@ -668,6 +691,15 @@ class PrimeAgentBackend:
                         )
                     if event.get("type") == "message_update":
                         telemetry_event_count += 1
+                        transport_counters["message_update_count"] += 1
+                        if "message" in event:
+                            transport_counters["message_snapshot_bytes"] += serialized_value_bytes(
+                                event["message"]
+                            )
+                        if "delta" in event:
+                            transport_counters["message_delta_bytes"] += serialized_value_bytes(
+                                event["delta"]
+                            )
                         if telemetry_event_count > _PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT:
                             raise BackendError(
                                 "OUTPUT_LIMIT_EXCEEDED",
@@ -675,8 +707,8 @@ class PrimeAgentBackend:
                                 audit_status="OUTPUT_LIMIT_TELEMETRY_EVENTS",
                             )
                     else:
-                        event_count += 1
-                        if event_count > _PRIME_RPC_EVENT_COUNT_LIMIT:
+                        semantic_event_count += 1
+                        if semantic_event_count > _PRIME_RPC_EVENT_COUNT_LIMIT:
                             raise BackendError(
                                 "OUTPUT_LIMIT_EXCEEDED",
                                 "Prime Agent RPC exceeded the semantic event-count limit",
@@ -1005,19 +1037,31 @@ class PrimeAgentBackend:
                     return parse_json_object(final_text)
 
             async def run_rpc_and_settle() -> dict[str, Any]:
-                result = await run_rpc()
-                if not rpc_stdin.is_closing():
-                    rpc_stdin.close()
-                await _terminate_process(rpc_proc)
-                if not stderr_task.done():
-                    stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-                return result
+                try:
+                    result = await run_rpc()
+                    if not rpc_stdin.is_closing():
+                        rpc_stdin.close()
+                    await _terminate_process(rpc_proc)
+                    if not stderr_task.done():
+                        stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+                    return BackendResult(result, transport_metrics=transport_metrics())
+                except BackendError as exc:
+                    raise BackendError(
+                        exc.code,
+                        str(exc),
+                        audit_status=exc.audit_status,
+                        transport_metrics=transport_metrics(),
+                    ) from exc
 
             try:
                 return await asyncio.wait_for(run_rpc_and_settle(), timeout=self.timeout)
             except TimeoutError as exc:
-                raise BackendError("BACKEND_TIMEOUT", "Prime Agent RPC timed out") from exc
+                raise BackendError(
+                    "BACKEND_TIMEOUT",
+                    "Prime Agent RPC timed out",
+                    transport_metrics=transport_metrics(),
+                ) from exc
         finally:
             if proc is not None:
                 if proc.stdin is not None and not proc.stdin.is_closing():
@@ -1154,8 +1198,17 @@ class FailoverBackend:
         effective_timeout_seconds: float,
         used_fallback: bool,
         primary_error_code: str | None = None,
-        circuit_admission: bool = False,
     ) -> dict[str, Any]:
+        if route_role == "primary":
+            if route is not self.primary:
+                raise BackendError("INVALID_REQUEST", "primary route identity is inconsistent")
+            circuit_admission = True
+        elif route_role == "fallback":
+            if route is not self.fallback:
+                raise BackendError("INVALID_REQUEST", "fallback route identity is inconsistent")
+            circuit_admission = False
+        else:
+            raise BackendError("INVALID_REQUEST", "failover route role is invalid")
         remaining = (request.deadline - datetime.now(UTC)).total_seconds()
         if remaining < effective_timeout_seconds:
             raise BackendError(
@@ -1223,9 +1276,18 @@ class FailoverBackend:
                         request,
                         exc.audit_status,
                         error_code=self._normalized_error_code(exc.code),
+                        transport_metrics=exc.transport_metrics,
                     )
                 except TypeError:
-                    admitted = audit.finish(call_id, request, exc.audit_status)
+                    try:
+                        admitted = audit.finish(
+                            call_id,
+                            request,
+                            exc.audit_status,
+                            error_code=self._normalized_error_code(exc.code),
+                        )
+                    except TypeError:
+                        admitted = audit.finish(call_id, request, exc.audit_status)
                 self._record(
                     request,
                     route,
@@ -1300,14 +1362,20 @@ class FailoverBackend:
                 if role == "fallback"
                 else self.primary_timeout_seconds
             )
-            return await self._invoke_route(
-                route,
-                request,
-                audit,
-                route_role=str(role),
-                effective_timeout_seconds=timeout,
-                used_fallback=role == "fallback",
-            )
+            try:
+                return await self._invoke_route(
+                    route,
+                    request,
+                    audit,
+                    route_role=str(role),
+                    effective_timeout_seconds=timeout,
+                    used_fallback=role == "fallback",
+                )
+            except _PrimaryCircuitOpen:
+                raise BackendError(
+                    "MALFORMED_PROVIDER_OUTPUT",
+                    "producer-affine repair cannot start after the primary circuit opens",
+                ) from None
 
         circuit_open = self._circuit_score(attempt_rows) >= 2
         primary_error_code: str | None = None
@@ -1320,7 +1388,6 @@ class FailoverBackend:
                 route_role="primary",
                 effective_timeout_seconds=self.primary_timeout_seconds,
                 used_fallback=False,
-                circuit_admission=True,
             )
 
         async def call_fallback() -> dict[str, Any]:

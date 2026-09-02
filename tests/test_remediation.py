@@ -2498,6 +2498,14 @@ async def test_prime_backend_bounds_raw_rpc_transport_before_semantic_projection
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
     assert caught.value.audit_status == "OUTPUT_LIMIT_RAW_TRANSPORT"
     assert "raw transport" in str(caught.value)
+    metrics = caught.value.transport_metrics
+    assert metrics is not None
+    assert metrics.raw_transport_bytes > 1024
+    assert metrics.event_count >= 4
+    assert metrics.max_event_bytes > 256
+    assert metrics.message_update_count >= 3
+    assert metrics.message_snapshot_bytes == 0
+    assert metrics.message_delta_bytes >= 3 * 256
 
 
 @pytest.mark.asyncio

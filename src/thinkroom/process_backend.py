@@ -8,7 +8,7 @@ import signal
 from multiprocessing.connection import Connection
 from typing import Any
 
-from .ports import BackendError, RolloutBackend
+from .ports import BackendError, BackendResult, BackendTransportMetrics, RolloutBackend
 from .schemas import BackendRequestV1
 
 _CANCEL = b"cancel"
@@ -29,6 +29,9 @@ def _safe_error(exc: BaseException) -> dict[str, Any]:
             "code": exc.code,
             "message": str(exc),
             "audit_status": exc.audit_status,
+            "transport_metrics": (
+                exc.transport_metrics.as_dict() if exc.transport_metrics is not None else None
+            ),
         }
     return {
         "kind": "backend_error",
@@ -55,7 +58,15 @@ async def _run_child(
         except BaseException as exc:
             envelope = _safe_error(exc)
         else:
-            envelope = {"kind": "result", "value": result}
+            envelope = {
+                "kind": "result",
+                "value": dict(result) if type(result) is BackendResult else result,
+                "transport_metrics": (
+                    result.transport_metrics.as_dict()
+                    if type(result) is BackendResult and result.transport_metrics is not None
+                    else None
+                ),
+            }
         encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > _MAX_ENVELOPE_BYTES:
             encoded = json.dumps(
@@ -291,12 +302,35 @@ class ProcessIsolatedBackend:
                     raise BackendError(
                         "MALFORMED_PROVIDER_OUTPUT", "provider process returned invalid data"
                     )
-                raise BackendError(code, message, audit_status=audit_status)
+                try:
+                    transport_metrics = BackendTransportMetrics.from_untrusted(
+                        envelope.get("transport_metrics")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise BackendError(
+                        "MALFORMED_PROVIDER_OUTPUT", "provider process returned invalid data"
+                    ) from exc
+                raise BackendError(
+                    code,
+                    message,
+                    audit_status=audit_status,
+                    transport_metrics=transport_metrics,
+                )
             value = envelope.get("value")
             if not isinstance(value, dict):
                 raise BackendError(
                     "MALFORMED_PROVIDER_OUTPUT", "provider process returned invalid data"
                 )
+            try:
+                transport_metrics = BackendTransportMetrics.from_untrusted(
+                    envelope.get("transport_metrics")
+                )
+            except (TypeError, ValueError) as exc:
+                raise BackendError(
+                    "MALFORMED_PROVIDER_OUTPUT", "provider process returned invalid data"
+                ) from exc
+            if transport_metrics is not None:
+                return BackendResult(value, transport_metrics=transport_metrics)
             return value
         except (EOFError, BrokenPipeError, OSError) as exc:
             if process.pid is not None:

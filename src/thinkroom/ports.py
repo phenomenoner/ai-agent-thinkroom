@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from .schemas import (
@@ -20,15 +22,76 @@ class ResearchRepository(Protocol):
     """
 
 
+@dataclass(frozen=True)
+class BackendTransportMetrics:
+    """Content-free numeric evidence for one provider transport."""
+
+    raw_transport_bytes: int = 0
+    event_count: int = 0
+    max_event_bytes: int = 0
+    message_update_count: int = 0
+    message_snapshot_bytes: int = 0
+    message_delta_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        for value in asdict(self).values():
+            if type(value) is not int or value < 0 or value > 2**63 - 1:
+                raise ValueError("transport metrics must be non-negative 64-bit integers")
+
+    def as_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+    @classmethod
+    def from_untrusted(cls, value: object) -> BackendTransportMetrics | None:
+        if value is None:
+            return None
+        if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
+            raise ValueError("transport metrics shape is invalid")
+        return cls(**value)
+
+    def repository_values(self) -> dict[str, int]:
+        return {
+            "transport_bytes": self.raw_transport_bytes,
+            "transport_events": self.event_count,
+            "transport_max_event_bytes": self.max_event_bytes,
+            "transport_message_updates": self.message_update_count,
+            "transport_snapshot_bytes": self.message_snapshot_bytes,
+            "transport_delta_bytes": self.message_delta_bytes,
+        }
+
+
+class BackendResult(dict[str, Any]):
+    """Provider result carrying optional content-free transport evidence."""
+
+    def __init__(
+        self,
+        value: Mapping[str, Any],
+        *,
+        transport_metrics: BackendTransportMetrics | None = None,
+    ) -> None:
+        super().__init__(value)
+        self.transport_metrics = transport_metrics
+
+
 class BackendError(RuntimeError):
     """Core-owned typed provider-boundary error."""
 
-    def __init__(self, code: str, message: str, *, audit_status: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        audit_status: str | None = None,
+        transport_metrics: BackendTransportMetrics | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         candidate = code if audit_status is None else audit_status
         self.audit_status = (
             candidate if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", candidate) else "invalid"
+        )
+        self.transport_metrics = (
+            transport_metrics if type(transport_metrics) is BackendTransportMetrics else None
         )
 
 
@@ -62,6 +125,7 @@ class ProviderInvocationAudit(Protocol):
         output_size: int = 0,
         *,
         error_code: str | None = None,
+        transport_metrics: BackendTransportMetrics | None = None,
     ) -> bool: ...
 
 

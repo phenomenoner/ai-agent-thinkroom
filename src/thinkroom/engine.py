@@ -13,7 +13,13 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .packs import get_pack
-from .ports import BackendError, ResearchRepository, RolloutBackend, provider_payload
+from .ports import (
+    BackendError,
+    BackendTransportMetrics,
+    ResearchRepository,
+    RolloutBackend,
+    provider_payload,
+)
 from .schemas import (
     MAX_SYNTHESIS_EVIDENCE_ITEMS,
     BackendRequestV1,
@@ -144,6 +150,7 @@ class _RepositoryProviderInvocationAudit:
         output_size: int = 0,
         *,
         error_code: str | None = None,
+        transport_metrics: BackendTransportMetrics | None = None,
     ) -> bool:
         if output_status == "cancelled":
             return self.repo.settle_cancelled_provider_call(
@@ -159,6 +166,11 @@ class _RepositoryProviderInvocationAudit:
             output_status=output_status,
             output_size=output_size,
             error_code=error_code,
+            **(
+                transport_metrics.repository_values()
+                if type(transport_metrics) is BackendTransportMetrics
+                else {}
+            ),
         )
 
 
@@ -171,7 +183,12 @@ def normalize_provider_exception(exc: BaseException) -> Exception:
     if type(exc) is BackendError and type(exc.code) is str:
         message = _PROVIDER_ERROR_MESSAGES.get(exc.code)
         if message is not None:
-            return BackendError(exc.code, message, audit_status=exc.audit_status)
+            return BackendError(
+                exc.code,
+                message,
+                audit_status=exc.audit_status,
+                transport_metrics=exc.transport_metrics,
+            )
     return _ProviderBoundaryFailure()
 
 
@@ -1140,6 +1157,12 @@ class ResearchEngine:
                     call_id_box,
                 )
                 call_id = call_id_box[0]
+                transport_metrics = getattr(raw, "transport_metrics", None)
+                transport_values = (
+                    transport_metrics.repository_values()
+                    if type(transport_metrics) is BackendTransportMetrics
+                    else {}
+                )
                 await self._guard(job_id, aid, deadline)
                 encoded = json.dumps(raw, ensure_ascii=False).encode()
                 output_size = len(encoded)
@@ -1168,6 +1191,7 @@ class ResearchEngine:
                     output_size=output_size,
                     backend=selected_backend,
                     model=selected_model,
+                    **transport_values,
                 )
                 if not admitted:
                     await self._guard(job_id, aid, deadline)
@@ -1223,6 +1247,7 @@ class ResearchEngine:
                 )
                 output_status = exc.audit_status if type(exc) is BackendError else safe_status
                 if final_call_id is not None and not call_settled:
+                    error_transport_metrics = getattr(exc, "transport_metrics", None)
                     self.repo.finish_provider_call(
                         final_call_id,
                         aid,
@@ -1237,6 +1262,11 @@ class ResearchEngine:
                             else "MALFORMED_PROVIDER_OUTPUT"
                             if isinstance(exc, ValidationError)
                             else "UNCLASSIFIED_ERROR"
+                        ),
+                        **(
+                            error_transport_metrics.repository_values()
+                            if type(error_transport_metrics) is BackendTransportMetrics
+                            else {}
                         ),
                     )
                 retryable = isinstance(exc, ValidationError) or (

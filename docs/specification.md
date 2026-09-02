@@ -282,12 +282,13 @@ Long LLM calls require asynchronous jobs and durable state, but v0.2 is a single
 - `state_transitions`: attempt, from/to state, timestamp, reason, correlation ID.
 - `frames`: one immutable result per attempt.
 - `branches`: attempt ID, branch ID, perspective, state, structured rollout result, timing, error.
-- `provider_calls`: phase, schema/prompt versions, model/backend, timing, retry index, output status and size.
+- `provider_calls`: phase, schema/prompt versions, model/backend, timing, retry index, output status
+  and size, route/deadline/error evidence, and optional content-free Prime RPC transport counters.
 - `critiques`: one result per attempt naming consumed branch IDs.
 - `syntheses`: one result per successful attempt naming consumed critique and branch IDs.
 - `idempotency_keys`: key, request hash, job id.
 
-JSON payloads are versioned. An empty database receives the current canonical schema. Only the exact canonical v0.2.4 provider-call schema may migrate to v0.2.5: append `route_role`, `effective_timeout_seconds`, and `error_code` columns to `provider_calls`, then re-attest the complete v0.2.5 shape before readiness. Any other existing noncanonical or prerelease schema is rejected before live DDL or other writes and readiness remains false. A future schema migration requires another explicit versioned contract and independent release evidence before readiness may succeed.
+JSON payloads are versioned. An empty database receives the current canonical schema. Only the exact canonical v0.2.4 provider-call schema may migrate to v0.2.5: append `route_role`, `effective_timeout_seconds`, `error_code`, `transport_bytes`, `transport_events`, `transport_max_event_bytes`, `transport_message_updates`, `transport_snapshot_bytes`, and `transport_delta_bytes` columns to `provider_calls`, then re-attest the complete v0.2.5 shape before readiness. The transport fields are nullable non-negative integer counters. They never contain prompt, response, event, provider-error, or credential text and remain null for a backend without measurement support. Any other existing noncanonical or prerelease schema is rejected before live DDL or other writes and readiness remains false. A future schema migration requires another explicit versioned contract and independent release evidence before readiness may succeed.
 
 Retention defaults to 30 days for completed jobs and never deletes active jobs. Cleanup is bounded per cycle and disabled only by explicit configuration. A job exceeding its persisted-byte budget fails with `ARTIFACT_LIMIT_EXCEEDED`; data already persisted remains available for diagnosis.
 
@@ -384,7 +385,7 @@ A second service instance cannot acquire worker ownership; readiness/public bind
 
 ### AC-011 — Prime RPC output-limit discrimination and containment
 
-Given a valid Prime RPC lifecycle with more discardable `message_update` events than the semantic-event ceiling, the phase succeeds while remaining below the separate telemetry and raw-byte ceilings. Exceeding the semantic-event, telemetry-event, raw-byte, per-event, control-byte, or terminal-text ceiling fails with public code `OUTPUT_LIMIT_EXCEEDED`, preserves the corresponding safe audit status through process isolation and physical provider-call settlement, and never makes that code eligible for provider failover. An initial fork output-limit failure completes with deterministic perspectives and an output-limit-specific provenance warning; the same failure in framing remains terminal.
+Given a valid Prime RPC lifecycle with more discardable `message_update` events than the semantic-event ceiling, the phase succeeds while remaining below the separate telemetry and raw-byte ceilings. Each Prime invocation records total raw bytes, total events, largest-event bytes, telemetry-event count, cumulative serialized `message_update.message` bytes, and cumulative serialized `message_update.delta` bytes without retaining their values. The same bounded numeric snapshot is attached to a typed Prime backend failure, crosses the process boundary, and settles on the physical provider-call row. Exceeding the semantic-event, telemetry-event, raw-byte, per-event, control-byte, or terminal-text ceiling fails with public code `OUTPUT_LIMIT_EXCEEDED`, preserves the corresponding safe audit status through process isolation and physical provider-call settlement, and never makes that code eligible for provider failover. Measurement never bypasses a ceiling and incomplete or schema-invalid JSON is never salvaged. An initial fork output-limit failure completes with deterministic perspectives and an output-limit-specific provenance warning; the same failure in framing remains terminal.
 
 ### Required gates
 

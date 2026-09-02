@@ -15,7 +15,7 @@ import pytest
 from thinkroom.api import create_app
 from thinkroom.backends import PrimeAgentBackend, ScriptedBackend
 from thinkroom.config import Settings
-from thinkroom.ports import BackendError
+from thinkroom.ports import BackendError, BackendTransportMetrics
 from thinkroom.process_backend import ProcessIsolatedBackend
 from thinkroom.schemas import BackendRequestV1, FrameInputV1, ResearchRequest
 from thinkroom.service import ThinkroomService
@@ -58,6 +58,14 @@ class OutputLimitBackend:
             "OUTPUT_LIMIT_EXCEEDED",
             "provider response exceeded byte limit",
             audit_status="OUTPUT_LIMIT_FINAL_TEXT",
+            transport_metrics=BackendTransportMetrics(
+                raw_transport_bytes=1234,
+                event_count=9,
+                max_event_bytes=456,
+                message_update_count=7,
+                message_snapshot_bytes=890,
+                message_delta_bytes=321,
+            ),
         )
 
 
@@ -113,6 +121,14 @@ async def test_process_isolated_backend_preserves_safe_output_limit_audit_status
 
     assert caught.value.code == "OUTPUT_LIMIT_EXCEEDED"
     assert caught.value.audit_status == "OUTPUT_LIMIT_FINAL_TEXT"
+    assert caught.value.transport_metrics == BackendTransportMetrics(
+        raw_transport_bytes=1234,
+        event_count=9,
+        max_event_bytes=456,
+        message_update_count=7,
+        message_snapshot_bytes=890,
+        message_delta_bytes=321,
+    )
     assert backend.active_process_count == 0
 
 

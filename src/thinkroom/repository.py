@@ -78,7 +78,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_queue ON research_jobs(state, created_at);
 _SCHEMA_SQL = _SCHEMA_SQL_V024.replace(
     "output_status TEXT, output_size INTEGER)",
     "output_status TEXT, output_size INTEGER, route_role TEXT, "
-    "effective_timeout_seconds REAL, error_code TEXT)",
+    "effective_timeout_seconds REAL, error_code TEXT, transport_bytes INTEGER, "
+    "transport_events INTEGER, transport_max_event_bytes INTEGER, "
+    "transport_message_updates INTEGER, transport_snapshot_bytes INTEGER, "
+    "transport_delta_bytes INTEGER)",
 )
 _MANAGED_TABLES = (
     "research_jobs",
@@ -206,6 +209,20 @@ class SQLiteRepository:
                         "ALTER TABLE provider_calls ADD COLUMN effective_timeout_seconds REAL"
                     )
                     db.execute("ALTER TABLE provider_calls ADD COLUMN error_code TEXT")
+                    db.execute("ALTER TABLE provider_calls ADD COLUMN transport_bytes INTEGER")
+                    db.execute("ALTER TABLE provider_calls ADD COLUMN transport_events INTEGER")
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN transport_max_event_bytes INTEGER"
+                    )
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN transport_message_updates INTEGER"
+                    )
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN transport_snapshot_bytes INTEGER"
+                    )
+                    db.execute(
+                        "ALTER TABLE provider_calls ADD COLUMN transport_delta_bytes INTEGER"
+                    )
                     self._attest_schema(db)
                 return
             db.executescript(_SCHEMA_SQL)
