@@ -246,9 +246,11 @@ raw-transport output limit：它不重試 primary，會開啟 attempt-local prim
 請先透過 [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) 的互動式 `/login`
 流程完成認證。Thinkroom 不會複製 OAuth 憑證；
 Prime Agent 仍自行讀取與更新它擁有的 credential store。每次 Thinkroom provider invocation
-會建立一個有界的 RPC session，要求一個原生 RLM child，且只有在同一 session 收到名稱
-相符的 child `agent_message` 後，才接受 schema JSON。暫存 working/session directory 會在
-process 完整 settle 後清除。
+會建立一個有界的 RPC session，要求一個原生 RLM child，且只有在同一 RPC stream 證明
+相符的 legacy child `agent_message`，或一個穩定的 Prime 0.8.1 child lifecycle 已完成並明確
+回覆 parent 後，才接受 schema JSON。使用 lifecycle 路徑時，admission handle、
+streamed snapshot、current registry entry 與 cleanup receipt 必須全部帶有相同的 child ID。暫存
+working/session directory 會在 process 完整 settle 後清除。
 上述 concurrency 與 timeout 是 root-plus-child model work 的保守起點，不是通用容量承諾；
 應依實際 provider latency 與 quota 調整。
 

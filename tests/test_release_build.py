@@ -327,6 +327,20 @@ def test_release_smokes_are_available_from_the_installed_console_script():
         assert "python scripts/smoke_process.py" not in readme
 
 
+def test_bilingual_readmes_describe_prime_lifecycle_custody_identity():
+    for relative in ("README.md", "README.zh-TW.md"):
+        text = (ROOT / relative).read_text()
+        assert "Prime 0.8.1" in text
+        for identity_term in (
+            "admission handle",
+            "streamed snapshot",
+            "current registry entry",
+            "cleanup",
+            "receipt",
+        ):
+            assert identity_term in text
+
+
 def test_public_docs_do_not_claim_a_pre_tag_signed_release():
     for relative in (
         "README.md",
