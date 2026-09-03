@@ -15,6 +15,8 @@ All notable changes to Thinkroom are documented here.
 - Exact canonical v0.2.5 SQLite databases can migrate to v0.2.6 by adding the accounted-transport
   counter; earlier v0.2.4 databases retain the existing sequential migration path, with the complete
   DDL chain and final attestation committed or rolled back as one transaction.
+- Managed Skills now recognize the exact released v0.2.5 six-file receipt and migrate it directly
+  to the v0.2.6 bundle; modified payloads and unknown receipts still fail closed before mutation.
 
 ## 0.2.5 — 2026-09-01
 

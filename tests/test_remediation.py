@@ -5451,6 +5451,17 @@ _PROFILED_RECEIPTS = {
             "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
         },
     },
+    "0.2.5": {
+        "manifest_sha256": "1358cc6c60a6f6308a54937c861c47bf8d3acec43392e3dbbcaeea3abc47d0d3",
+        "files": {
+            "thinkroom-install/SKILL.md": "0f252d8185d9fbb1fde5983f4f5c6c0ea05206da961af6ac4d477eb5f4ea0445",
+            "thinkroom-install/agents/openai.yaml": "f8e4e48ed350ffe45715b61599e066352fd39c8d3ab04f671db80210aba400b2",
+            "thinkroom-operate/SKILL.md": "dbf13983c03e11944ff54d0170ac73bcfe4f568108afc2dffb204049f8d138aa",
+            "thinkroom-operate/agents/openai.yaml": "0ac5a5acb8f37605692721f87b1688de5494601c0dd0a1b9346cc8a480ca7823",
+            "thinkroom-trigger/SKILL.md": "25a5fb2e127028fae94a2c93d4ea1f9de451dec108b6b3ea82ac8e4d86d1091a",
+            "thinkroom-trigger/agents/openai.yaml": "e2e2f1db29df78feb7941c729d26bb53dfd3c1fdf5c24d02c34b65c4ee8e8c3e",
+        },
+    },
 }
 
 
@@ -5536,6 +5547,11 @@ def _seed_profiled_skills(target: Path, version: str) -> None:
             '  tags: "thinkroom, research, operations"'
         ),
     }
+    if version == "0.2.5":
+        legacy_metadata = {
+            relative: metadata.replace('version: "0.2.6"', 'version: "0.2.5"')
+            for relative, metadata in current_metadata.items()
+        }
     for relative in legacy_metadata:
         text = payloads[relative].decode()
         text = text.replace(current_metadata[relative], legacy_metadata[relative])
@@ -5549,9 +5565,10 @@ def _seed_profiled_skills(target: Path, version: str) -> None:
         "from starting. Preserve the `partial` artifact and branch failures, but do not present it as a\n"
         "completed synthesis or as evidence that every requested perspective ran.\n\n"
     )
-    payloads["thinkroom-operate/SKILL.md"] = payloads["thinkroom-operate/SKILL.md"].replace(
-        operate_addition.encode(), b""
-    )
+    if version != "0.2.5":
+        payloads["thinkroom-operate/SKILL.md"] = payloads["thinkroom-operate/SKILL.md"].replace(
+            operate_addition.encode(), b""
+        )
     expected_files = historical["files"]
     assert {
         relative: hashlib.sha256(data).hexdigest() for relative, data in payloads.items()
@@ -5606,7 +5623,7 @@ def test_skills_known_crlf_preprofile_receipt_migrates_to_lf_bundle(tmp_path):
     assert {item["classification"] for item in skill_status(target)} == {"EXACT"}
 
 
-@pytest.mark.parametrize("version", ["0.2.1", "0.2.2", "0.2.3", "0.2.4"])
+@pytest.mark.parametrize("version", ["0.2.1", "0.2.2", "0.2.3", "0.2.4", "0.2.5"])
 def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     target = tmp_path / "skills"
     _seed_profiled_skills(target, version)
@@ -5626,7 +5643,7 @@ def test_skills_known_profiled_receipt_migrates_directly(version, tmp_path):
     assert len(receipt["files"]) == 6
 
 
-@pytest.mark.parametrize("version", ["0.2.2", "0.2.3"])
+@pytest.mark.parametrize("version", ["0.2.2", "0.2.3", "0.2.5"])
 @pytest.mark.parametrize("operation", ["install", "status", "uninstall"])
 def test_skills_known_profiled_receipt_tamper_blocks_without_mutation(version, operation, tmp_path):
     from thinkroom import skills as skill_module
