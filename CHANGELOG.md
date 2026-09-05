@@ -2,6 +2,26 @@
 
 All notable changes to Thinkroom are documented here.
 
+## 0.2.7 — 2026-09-06
+
+### Fixed
+
+- Failover route timeouts cover adapter invocation and process startup. Cancellation drains before
+  fallback starts, and a late return after timeout cannot be accepted as a successful result.
+- Same-route retries are skipped when their delay and both configured route timeouts cannot fit
+  the remaining deadline, retaining the opportunity to use the configured fallback.
+- Soft admission expiry no longer prevents best-effort critique and synthesis of available
+  branches within the original hard deadline. Missing admissions remain explicitly partial,
+  including when synthesis is available; no completion-rate or research-quality guarantee is made.
+
+### Added
+
+- A separate research diagnostics endpoint and SDK method expose content-free admission failures
+  without changing legacy research-detail or partial schemas or inventing physical provider calls.
+
+The SQLite schema and managed Skills bundle remain at their existing v0.2.6 identities; this patch
+requires no schema migration or managed Skills replacement.
+
 ## 0.2.6 — 2026-09-03
 
 ### Fixed

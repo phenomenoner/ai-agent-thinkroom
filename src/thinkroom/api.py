@@ -15,7 +15,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .schemas import ErrorBody, JobList, JobResource, JobState, ResearchDetail, ResearchRequest
+from .schemas import (
+    ErrorBody,
+    JobList,
+    JobResource,
+    JobState,
+    ResearchDetail,
+    ResearchDiagnosticsV1,
+    ResearchRequest,
+)
 from .service import ThinkroomService, get_service
 
 
@@ -168,7 +176,7 @@ def create_app(service: ThinkroomService | None = None) -> FastAPI:
         finally:
             await svc.stop()
 
-    app = FastAPI(title="Thinkroom", version="0.2.6", openapi_version="3.1.0", lifespan=lifespan)
+    app = FastAPI(title="Thinkroom", version="0.2.7", openapi_version="3.1.0", lifespan=lifespan)
     app.add_middleware(RequestBodyLimitMiddleware, max_bytes=svc.settings.max_context_bytes)
     app.add_middleware(LoopbackHostMiddleware)
 
@@ -230,7 +238,7 @@ def create_app(service: ThinkroomService | None = None) -> FastAPI:
 
     @app.get("/api/v1/version")
     async def version() -> dict[str, str]:
-        return {"version": "0.2.6", "schema_version": "1"}
+        return {"version": "0.2.7", "schema_version": "1"}
 
     def resource(job_id: str) -> JobResource:
         row = svc.repo.get_job(job_id)
@@ -344,6 +352,27 @@ def create_app(service: ThinkroomService | None = None) -> FastAPI:
         if detail is None:
             raise err(404, "NOT_FOUND", "research job not found")
         return detail
+
+    @app.get(
+        "/api/v1/research/{job_id}/diagnostics",
+        response_model=ResearchDiagnosticsV1,
+        responses={404: {"model": ErrorBody}},
+    )
+    async def get_diagnostics(job_id: str) -> ResearchDiagnosticsV1:
+        row = svc.repo.get_job(job_id)
+        if row is None:
+            raise err(404, "NOT_FOUND", "research job not found")
+        aid = row["attempt_id"]
+        failures = (
+            [
+                json.loads(item["payload"])
+                for item in svc.repo.get_artifacts(job_id, aid)
+                if item["kind"] == "admission"
+            ]
+            if aid
+            else []
+        )
+        return ResearchDiagnosticsV1(job_id=job_id, attempt_id=aid, admission_failures=failures)
 
     @app.delete(
         "/api/v1/research/{job_id}",

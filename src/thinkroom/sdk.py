@@ -149,6 +149,9 @@ class ThinkroomClient:
     def get(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/research/{job_id}")
 
+    def diagnostics(self, job_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/research/{job_id}/diagnostics")
+
     def list(self, **kwargs: Any) -> dict[str, Any]:
         return self._request("GET", "/api/v1/research", params=kwargs)
 

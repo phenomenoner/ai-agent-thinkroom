@@ -1325,7 +1325,17 @@ class FailoverBackend:
         else:
             admit()
         try:
-            return await route.invoke(request)
+            try:
+                # Include process startup and wrapper work, not only the inner RPC.
+                # Cancellation drains before another route may start; late results are rejected.
+                timeout_scope = asyncio.timeout(effective_timeout_seconds)
+                async with timeout_scope:
+                    result = await route.invoke(request)
+                if timeout_scope.expired():
+                    raise TimeoutError
+                return result
+            except TimeoutError:
+                raise BackendError("BACKEND_TIMEOUT", "provider route timed out") from None
         except asyncio.CancelledError:
             if audit is not None and call_id is not None:
                 try:
@@ -1507,8 +1517,12 @@ class FailoverBackend:
             retryable = exc.code == "RATE_LIMITED" or (
                 exc.code == "PROVIDER_ERROR" and primary_duration <= self.fast_transient_seconds
             )
-            if retryable and calls_used < self._MAX_PHYSICAL_CALLS:
-                await asyncio.sleep(random.uniform(*self.retry_delay_seconds))
+            retry_delay = random.uniform(*self.retry_delay_seconds) if retryable else 0.0
+            retry_fits = (request.deadline - datetime.now(UTC)).total_seconds() >= (
+                retry_delay + self.primary_timeout_seconds + self.fallback_timeout_seconds
+            )
+            if retryable and calls_used < self._MAX_PHYSICAL_CALLS and retry_fits:
+                await asyncio.sleep(retry_delay)
                 calls_used += 1
                 try:
                     return await call_primary()

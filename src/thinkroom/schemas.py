@@ -399,6 +399,17 @@ class ResearchProgressV1(StrictModel):
     phases: list[PhaseProgressV1] = Field(default_factory=list)
 
 
+class AdmissionFailureV1(StrictModel):
+    phase: Phase
+    branch_id: BoundedId | None = None
+    retry_index: int = Field(ge=0)
+    reason: Literal["SOFT_DEADLINE_REACHED", "DEADLINE_EXCEEDED"]
+    wait_seconds: float = Field(ge=0)
+    admission_deadline: datetime
+    execution_deadline: datetime
+    provider_started: Literal[False] = False
+
+
 class PartialResearchV1(StrictModel):
     schema_version: Literal[1] = 1
     reason: Literal["SOFT_DEADLINE_REACHED"]
@@ -407,6 +418,12 @@ class PartialResearchV1(StrictModel):
     failed_branch_ids: list[BoundedId] = Field(default_factory=list, max_length=6)
     skipped_branch_ids: list[BoundedId] = Field(default_factory=list, max_length=6)
     skipped_phases: list[Phase] = Field(default_factory=list, max_length=5)
+
+
+class ResearchDiagnosticsV1(StrictModel):
+    job_id: str
+    attempt_id: str | None = None
+    admission_failures: list[AdmissionFailureV1] = Field(default_factory=list, max_length=24)
 
 
 class ResearchDetail(StrictModel):

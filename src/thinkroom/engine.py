@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -321,17 +322,37 @@ class ResearchEngine:
             if request.phase == "rollout"
             else self._serial_provider_semaphore
         )
+        admission_started = time.monotonic()
         start_by = min(deadline, admission_deadline) if admission_deadline else deadline
+
+        def reject_admission(code: str) -> BackendError:
+            self.repo.put_artifact(
+                request.job_id,
+                request.attempt_id,
+                "admission",
+                {
+                    "phase": request.phase,
+                    "branch_id": request.branch_id,
+                    "retry_index": retry_index,
+                    "reason": code,
+                    "wait_seconds": max(0.0, time.monotonic() - admission_started),
+                    "admission_deadline": start_by.isoformat(),
+                    "execution_deadline": deadline.isoformat(),
+                    "provider_started": False,
+                },
+            )
+            return BackendError(code, "provider call admission deadline exceeded")
+
         soft_limits_admission = admission_deadline is not None and admission_deadline < deadline
         remaining = (start_by - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
             code = "SOFT_DEADLINE_REACHED" if soft_limits_admission else "DEADLINE_EXCEEDED"
-            raise BackendError(code, "provider call admission deadline exceeded")
+            raise reject_admission(code)
         try:
             await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
         except TimeoutError:
             code = "SOFT_DEADLINE_REACHED" if soft_limits_admission else "DEADLINE_EXCEEDED"
-            raise BackendError(code, "provider call admission deadline exceeded") from None
+            raise reject_admission(code) from None
 
         if (
             soft_limits_admission
@@ -339,7 +360,7 @@ class ResearchEngine:
             and admission_deadline <= datetime.now(UTC)
         ):
             semaphore.release()
-            raise BackendError("SOFT_DEADLINE_REACHED", "job soft deadline reached")
+            raise reject_admission("SOFT_DEADLINE_REACHED")
 
         remaining_after_acquire = (deadline - datetime.now(UTC)).total_seconds()
         if remaining_after_acquire <= 0:
@@ -694,19 +715,33 @@ class ResearchEngine:
                 else "provider fork invalid; deterministic fallback used"
             )
         else:
-            perspectives, warning = await self._diverse_fork(
-                fork,
-                request.branch_count,
-                fork_input,
-                job_id,
-                aid,
-                deadline,
-                correlation,
-                pack.prompt_version,
-                fork_repair_budget,
-                pack,
-                soft_deadline,
-            )
+            try:
+                perspectives, warning = await self._diverse_fork(
+                    fork,
+                    request.branch_count,
+                    fork_input,
+                    job_id,
+                    aid,
+                    deadline,
+                    correlation,
+                    pack.prompt_version,
+                    fork_repair_budget,
+                    pack,
+                    soft_deadline,
+                )
+            except BackendError as exc:
+                if exc.code != "SOFT_DEADLINE_REACHED":
+                    raise
+                self._settle_partial(
+                    job_id,
+                    aid,
+                    correlation,
+                    successful_branch_ids=[],
+                    failed_branch_ids=[],
+                    skipped_branch_ids=[],
+                    skipped_phases=["fork", "rollout", "critique", "synthesis"],
+                )
+                return
         await self._guard(job_id, aid, deadline)
         self.repo.put_artifact(
             job_id,
@@ -785,7 +820,7 @@ class ResearchEngine:
             for bid, _, error, code in outcomes
             if error and code != "SOFT_DEADLINE_REACHED"
         ]
-        if skipped_ids or datetime.now(UTC) >= soft_deadline:
+        if skipped_ids and not successful:
             self._settle_partial(
                 job_id,
                 aid,
@@ -800,13 +835,18 @@ class ResearchEngine:
             raise BackendError("NO_SUCCESSFUL_BRANCHES", "all branch rollouts failed")
         self.repo.transition(job_id, JobState.CRITIQUING, aid, "all branches terminal", correlation)
         successful_ids = [bid for bid, _ in successful]
+        unavailable = failed + [
+            {"branch_id": bid, "error": error}
+            for bid, _, error, code in outcomes
+            if code == "SOFT_DEADLINE_REACHED"
+        ]
         critique_input = {
             "successful_branches": [
                 {"branch_id": bid, "output": result.model_dump(mode="json")}
                 for bid, result in successful
             ],
             "successful_branch_ids": successful_ids,
-            "failed_branches": failed,
+            "failed_branches": unavailable,
         }
         critique_repair_budget = [1]
         try:
@@ -820,10 +860,12 @@ class ResearchEngine:
                 correlation,
                 pack.prompt_version,
                 repair_budget=critique_repair_budget,
-                admission_deadline=soft_deadline,
+                admission_deadline=deadline,
             )
         except BackendError as exc:
-            if exc.code != "SOFT_DEADLINE_REACHED":
+            if exc.code != "SOFT_DEADLINE_REACHED" and not (
+                exc.code == "DEADLINE_INSUFFICIENT" and datetime.now(UTC) >= soft_deadline
+            ):
                 raise
             self._settle_partial(
                 job_id,
@@ -831,7 +873,7 @@ class ResearchEngine:
                 correlation,
                 successful_branch_ids=successful_ids,
                 failed_branch_ids=[item["branch_id"] for item in failed],
-                skipped_branch_ids=[],
+                skipped_branch_ids=skipped_ids,
                 skipped_phases=["critique", "synthesis"],
             )
             return
@@ -859,10 +901,12 @@ class ResearchEngine:
                     pack.prompt_version,
                     repair_budget=critique_repair_budget,
                     retry_offset=1,
-                    admission_deadline=soft_deadline,
+                    admission_deadline=deadline,
                 )
             except BackendError as exc:
-                if exc.code != "SOFT_DEADLINE_REACHED":
+                if exc.code != "SOFT_DEADLINE_REACHED" and not (
+                    exc.code == "DEADLINE_INSUFFICIENT" and datetime.now(UTC) >= soft_deadline
+                ):
                     raise
                 self._settle_partial(
                     job_id,
@@ -870,7 +914,7 @@ class ResearchEngine:
                     correlation,
                     successful_branch_ids=successful_ids,
                     failed_branch_ids=[item["branch_id"] for item in failed],
-                    skipped_branch_ids=[],
+                    skipped_branch_ids=skipped_ids,
                     skipped_phases=["critique", "synthesis"],
                 )
                 return
@@ -887,24 +931,13 @@ class ResearchEngine:
         )
         critique_id = f"critique-{critique_artifact_id}"
         self.repo.transition(job_id, JobState.SYNTHESIZING, aid, "critique complete", correlation)
-        if datetime.now(UTC) >= soft_deadline:
-            self._settle_partial(
-                job_id,
-                aid,
-                correlation,
-                successful_branch_ids=successful_ids,
-                failed_branch_ids=[item["branch_id"] for item in failed],
-                skipped_branch_ids=[],
-                skipped_phases=["synthesis"],
-            )
-            return
         synthesis_input = {
             "frame": frame.model_dump(mode="json"),
             "successful_branches": [
                 {"branch_id": bid, "output": result.model_dump(mode="json")}
                 for bid, result in successful
             ],
-            "failed_branches": failed,
+            "failed_branches": unavailable,
             "critique": critique.model_dump(mode="json"),
             "critique_id": critique_id,
             "successful_branch_ids": successful_ids,
@@ -921,10 +954,12 @@ class ResearchEngine:
                 correlation,
                 pack.prompt_version,
                 repair_budget=synthesis_repair_budget,
-                admission_deadline=soft_deadline,
+                admission_deadline=deadline,
             )
         except BackendError as exc:
-            if exc.code != "SOFT_DEADLINE_REACHED":
+            if exc.code != "SOFT_DEADLINE_REACHED" and not (
+                exc.code == "DEADLINE_INSUFFICIENT" and datetime.now(UTC) >= soft_deadline
+            ):
                 raise
             self._settle_partial(
                 job_id,
@@ -932,7 +967,7 @@ class ResearchEngine:
                 correlation,
                 successful_branch_ids=successful_ids,
                 failed_branch_ids=[item["branch_id"] for item in failed],
-                skipped_branch_ids=[],
+                skipped_branch_ids=skipped_ids,
                 skipped_phases=["synthesis"],
             )
             return
@@ -961,10 +996,12 @@ class ResearchEngine:
                     pack.prompt_version,
                     repair_budget=synthesis_repair_budget,
                     retry_offset=1,
-                    admission_deadline=soft_deadline,
+                    admission_deadline=deadline,
                 )
             except BackendError as soft_exc:
-                if soft_exc.code != "SOFT_DEADLINE_REACHED":
+                if soft_exc.code != "SOFT_DEADLINE_REACHED" and not (
+                    soft_exc.code == "DEADLINE_INSUFFICIENT" and datetime.now(UTC) >= soft_deadline
+                ):
                     raise
                 self._settle_partial(
                     job_id,
@@ -972,7 +1009,7 @@ class ResearchEngine:
                     correlation,
                     successful_branch_ids=successful_ids,
                     failed_branch_ids=[item["branch_id"] for item in failed],
-                    skipped_branch_ids=[],
+                    skipped_branch_ids=skipped_ids,
                     skipped_phases=["synthesis"],
                 )
                 return
@@ -982,9 +1019,20 @@ class ResearchEngine:
         await self._guard(job_id, aid, deadline)
         self.repo.put_artifact(job_id, aid, "synthesis", synthesis.model_dump(mode="json"))
         await self._guard(job_id, aid, deadline)
-        self.repo.settle_terminal(
-            job_id, JobState.SUCCEEDED, aid, "succeeded", "complete", correlation
-        )
+        if skipped_ids:
+            self._settle_partial(
+                job_id,
+                aid,
+                correlation,
+                successful_branch_ids=successful_ids,
+                failed_branch_ids=[item["branch_id"] for item in failed],
+                skipped_branch_ids=skipped_ids,
+                skipped_phases=[],
+            )
+        else:
+            self.repo.settle_terminal(
+                job_id, JobState.SUCCEEDED, aid, "succeeded", "complete", correlation
+            )
 
     def _settle_partial(
         self,
@@ -1108,6 +1156,7 @@ class ResearchEngine:
         admission_deadline: datetime | None = None,
     ) -> Any:
         budget = repair_budget if repair_budget is not None else [1]
+        hard_deadline = deadline
         request = BackendRequestV1(
             phase=phase,
             job_id=job_id,
@@ -1122,7 +1171,7 @@ class ResearchEngine:
         last: Exception | None = None
         for retry in range(2):
             retry_index = retry_offset + retry
-            await self._guard(job_id, aid, deadline)
+            await self._guard(job_id, aid, hard_deadline)
             call_id_box: list[int | None] = [None]
             call_id: int | None = None
             output_size = 0
@@ -1149,7 +1198,7 @@ class ResearchEngine:
                         "retry_index": retry_index,
                     },
                 )
-                await self._guard(job_id, aid, deadline)
+                await self._guard(job_id, aid, hard_deadline)
                 raw = await self._invoke_provider_bounded(
                     request,
                     deadline,
@@ -1164,7 +1213,7 @@ class ResearchEngine:
                     if type(transport_metrics) is BackendTransportMetrics
                     else {}
                 )
-                await self._guard(job_id, aid, deadline)
+                await self._guard(job_id, aid, hard_deadline)
                 encoded = json.dumps(raw, ensure_ascii=False).encode()
                 output_size = len(encoded)
                 if output_size > self.settings.max_backend_response_bytes:
@@ -1195,7 +1244,7 @@ class ResearchEngine:
                     **transport_values,
                 )
                 if not admitted:
-                    await self._guard(job_id, aid, deadline)
+                    await self._guard(job_id, aid, hard_deadline)
                     raise BackendError("STALE_ATTEMPT", "attempt is no longer current")
                 log.info(
                     "provider_invocation_finished",
