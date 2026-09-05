@@ -326,21 +326,27 @@ class ResearchEngine:
         start_by = min(deadline, admission_deadline) if admission_deadline else deadline
 
         def reject_admission(code: str) -> BackendError:
-            self.repo.put_artifact(
-                request.job_id,
-                request.attempt_id,
-                "admission",
-                {
-                    "phase": request.phase,
-                    "branch_id": request.branch_id,
-                    "retry_index": retry_index,
-                    "reason": code,
-                    "wait_seconds": max(0.0, time.monotonic() - admission_started),
-                    "admission_deadline": start_by.isoformat(),
-                    "execution_deadline": deadline.isoformat(),
-                    "provider_started": False,
-                },
-            )
+            try:
+                self.repo.put_artifact(
+                    request.job_id,
+                    request.attempt_id,
+                    "admission",
+                    {
+                        "phase": request.phase,
+                        "branch_id": request.branch_id,
+                        "retry_index": retry_index,
+                        "reason": code,
+                        "wait_seconds": max(0.0, time.monotonic() - admission_started),
+                        "admission_deadline": start_by.isoformat(),
+                        "execution_deadline": deadline.isoformat(),
+                        "provider_started": False,
+                    },
+                )
+            except RuntimeError as exc:
+                # The repository fences writes after hard expiry, cancellation,
+                # or attempt replacement. Diagnostics must not mask that outcome.
+                if str(exc) != "CANCELLED_OR_STALE_ATTEMPT":
+                    raise
             return BackendError(code, "provider call admission deadline exceeded")
 
         soft_limits_admission = admission_deadline is not None and admission_deadline < deadline
