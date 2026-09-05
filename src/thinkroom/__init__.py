@@ -4,7 +4,7 @@ from typing import Any
 
 from .schemas import *  # noqa: F403
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 __all__ = [  # noqa: F405
     "Thinkroom",
     "ThinkroomClient",

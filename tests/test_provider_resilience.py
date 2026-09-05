@@ -871,7 +871,7 @@ async def test_soft_deadline_preserves_partial_artifact_and_skips_queued_rollout
             max_concurrency=1,
             rollout_provider_concurrency=1,
             job_soft_timeout_seconds=1,
-            job_timeout_seconds=10,
+            job_timeout_seconds=20,
             backend_timeout_seconds=5,
         ),
     )
@@ -893,6 +893,17 @@ async def test_soft_deadline_preserves_partial_artifact_and_skips_queued_rollout
         payload = json.loads(partial[0]["payload"])
         assert payload["reason"] == "SOFT_DEADLINE_REACHED"
         assert payload["skipped_branch_ids"]
+        assert "admission_failures" not in payload  # legacy strict-client contract
+        admissions = [
+            json.loads(row["payload"])
+            for row in repo.get_artifacts(job_id)
+            if row["kind"] == "admission"
+        ]
+        assert admissions
+        assert all(not item["provider_started"] for item in admissions)
+        assert any(item["wait_seconds"] > 0 for item in admissions)
+        assert any(row["kind"] == "synthesis" for row in repo.get_artifacts(job_id))
+        assert payload["skipped_phases"] == []
         assert backend.rollout_calls == 1
     finally:
         await engine.stop()
@@ -911,7 +922,7 @@ async def test_expired_soft_deadline_settles_partial_without_starting_frame(tmp_
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'expired-soft.sqlite'}",
             max_concurrency=1,
             job_soft_timeout_seconds=-1,
-            job_timeout_seconds=10,
+            job_timeout_seconds=20,
             backend_timeout_seconds=5,
         ),
     )
