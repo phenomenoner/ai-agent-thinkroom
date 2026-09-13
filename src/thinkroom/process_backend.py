@@ -142,6 +142,10 @@ class ProcessIsolatedBackend:
     def active_process_count(self) -> int:
         return sum(process.is_alive() for process in self._processes)
 
+    def preflight(self, request: BackendRequestV1) -> object:
+        preflight = getattr(self._backend, "preflight", None)
+        return preflight(request) if callable(preflight) else None
+
     async def _join(self, process: multiprocessing.Process, timeout: float) -> None:
         await asyncio.to_thread(process.join, timeout)
 

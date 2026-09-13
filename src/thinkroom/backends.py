@@ -21,6 +21,7 @@ from .ports import (
     BackendResult,
     BackendTransportMetrics,
     ProviderInvocationAudit,
+    RequestBudget,
     RolloutBackend,
     backend_input,
     provider_payload,
@@ -288,9 +289,24 @@ def _validate_prime_argv_setting(
 
 
 _PRIME_RPC_EVENT_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_PROMPT_BYTE_LIMIT = 65_536
 _PRIME_RPC_ACCOUNTED_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT = 512_000_000
 _PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES = 128
+
+
+def _prime_rpc_prompt_command(prompt: str) -> bytes:
+    """Use the same wire bytes for request accounting and the stdin write."""
+    return (
+        json.dumps(
+            {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
 _PRIME_RPC_ACCOUNTING_MAX_DEPTH = 64
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
 _PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT = 200_000
@@ -521,7 +537,9 @@ class PrimeAgentBackend:
             max_response_bytes,
         )
 
-    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+    def _render_request(
+        self, request: BackendRequestV1
+    ) -> tuple[str, str, str, str, RequestBudget]:
         payload = provider_payload(request)
         # Prime Agent exposes no supported output-token CLI flag. Use the token
         # budget only as four-byte-per-token prompt guidance and enforce the
@@ -551,11 +569,40 @@ class PrimeAgentBackend:
             "that matches output_json_schema, with no markdown or prose.\n\n"
             f"PROVIDER_REQUEST_JSON:\n{provider_request}"
         )
-        if len(prompt.encode("utf-8")) > 65536:
+        rpc_command_bytes = len(_prime_rpc_prompt_command(prompt))
+        return (
+            prompt,
+            child_name,
+            cleanup_recipe,
+            cleanup_marker,
+            RequestBudget(
+                prompt_bytes=len(prompt.encode("utf-8")),
+                rpc_command_bytes=rpc_command_bytes,
+                limit_bytes=_PRIME_RPC_PROMPT_BYTE_LIMIT,
+            ),
+        )
+
+    @staticmethod
+    def _validate_request_budget(budget: RequestBudget) -> None:
+        if budget.remaining_bytes < 0:
             raise BackendError(
                 "CONTEXT_LIMIT_EXCEEDED",
-                "Prime Agent RPC prompt exceeds the safe byte limit (65536)",
+                "Prime Agent RPC prompt requires "
+                f"{budget.prompt_bytes} UTF-8 bytes; safe limit is {budget.limit_bytes}",
             )
+
+    def request_budget(self, request: BackendRequestV1) -> RequestBudget:
+        *_, budget = self._render_request(request)
+        return budget
+
+    def preflight(self, request: BackendRequestV1) -> RequestBudget:
+        budget = self.request_budget(request)
+        self._validate_request_budget(budget)
+        return budget
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        prompt, child_name, cleanup_recipe, cleanup_marker, budget = self._render_request(request)
+        self._validate_request_budget(budget)
 
         proc: asyncio.subprocess.Process | None = None
         stderr_task: asyncio.Task[None] | None = None
@@ -602,14 +649,7 @@ class PrimeAgentBackend:
             rpc_stdin = proc.stdin
             rpc_stdout = proc.stdout
             stderr_task = asyncio.create_task(_drain_unretained(proc.stderr))
-            command = (
-                json.dumps(
-                    {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
-            )
+            command = _prime_rpc_prompt_command(prompt)
             rpc_stdin.write(command)
             await rpc_stdin.drain()
 
@@ -1260,6 +1300,11 @@ class FailoverBackend:
             self._request_key(request),
             BackendInvocationIdentity(self.primary.name, self.primary.model, False),
         )
+
+    def preflight(self, request: BackendRequestV1) -> object:
+        # CONTEXT_LIMIT_EXCEEDED is terminal, so only primary preflight is relevant.
+        preflight = getattr(self.primary, "preflight", None)
+        return preflight(request) if callable(preflight) else None
 
     async def _invoke_route(
         self,

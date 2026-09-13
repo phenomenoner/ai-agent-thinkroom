@@ -8,11 +8,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_provider_failover import BlockingBackend, StaticBackend, frame_request
 
-from thinkroom.backends import FailoverBackend, ScriptedBackend
+from thinkroom.backends import FailoverBackend, PrimeAgentBackend, ScriptedBackend
 from thinkroom.config import Settings
 from thinkroom.engine import ResearchEngine
+from thinkroom.ports import BackendError
 from thinkroom.repository import SQLiteRepository
-from thinkroom.schemas import ResearchRequest
+from thinkroom.schemas import BackendRequestV1, FrameInputV1, ResearchRequest
 
 
 async def test_route_timeout_includes_wrapper_and_reaches_fallback():
@@ -64,8 +65,6 @@ async def test_completed_rollouts_can_use_reserved_final_phases(tmp_path):
 
 
 async def test_retry_does_not_consume_fallback_reserve():
-    from thinkroom.ports import BackendError
-
     primary = StaticBackend("primary", "fake", error=BackendError("RATE_LIMITED", "busy"))
     fallback = StaticBackend("fallback", "fake")
     backend = FailoverBackend(
@@ -107,6 +106,204 @@ async def test_admission_failure_is_durable_without_a_provider_call(tmp_path):
         assert repo.provider_calls(job_id) == []
         artifacts = repo.get_artifacts(job_id)
         assert any(row["kind"] == "admission" for row in artifacts)
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+@pytest.mark.parametrize(
+    "isolated",
+    [
+        False,
+        pytest.param(
+            True, marks=pytest.mark.skipif(os.name != "posix", reason="native POSIX wrapper")
+        ),
+    ],
+)
+async def test_rpc_prompt_preflight_rejects_before_failover_provider_admission(
+    tmp_path, monkeypatch, isolated
+):
+    from thinkroom.process_backend import ProcessIsolatedBackend
+
+    repo = SQLiteRepository(str(tmp_path / "rpc-preflight.sqlite"))
+    repo.open()
+    primary = PrimeAgentBackend("/definitely/not/executed", "openrouter", "glm", "high")
+    fallback = StaticBackend("fallback", "fake")
+    route = ProcessIsolatedBackend(primary) if isolated else primary
+    starts = []
+    if isolated:
+
+        def forbidden_process(*args, **kwargs):
+            starts.append(True)
+            raise AssertionError("preflight rejection must precede process construction")
+
+        monkeypatch.setattr(route._context, "Process", forbidden_process)
+    engine = ResearchEngine(
+        repo,
+        FailoverBackend(route, fallback, primary_timeout_seconds=1, fallback_timeout_seconds=1),
+        Settings(),
+    )
+    try:
+        job_id, _ = repo.create_job(
+            ResearchRequest(question="Does the rendered RPC prompt fit?"),
+            "hash",
+            None,
+            100,
+            datetime.now(UTC) + timedelta(seconds=30),
+        )
+        claim = repo.claim_next_job(2, "test", "primary", "model")
+        assert claim
+        budget_request = BackendRequestV1(
+            phase="frame",
+            job_id=job_id,
+            attempt_id=claim[1],
+            prompt_version="coding-v1",
+            input=FrameInputV1(
+                question="Does the rendered RPC prompt fit?",
+                context="界" * 30000,
+                domain="coding",
+                guidance="g",
+                safety="s",
+            ),
+            expected_output_schema="FrameOutputV1",
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+            correlation_id="correlation",
+        )
+        budget = primary.request_budget(budget_request)
+        assert budget.prompt_bytes > budget.limit_bytes
+        assert budget.rpc_command_bytes > budget.prompt_bytes
+        assert budget.remaining_bytes == budget.limit_bytes - budget.prompt_bytes
+        with pytest.raises(BackendError) as caught:
+            await engine._phase(
+                "frame",
+                job_id,
+                claim[1],
+                None,
+                {
+                    "question": "Does the rendered RPC prompt fit?",
+                    "context": "界" * 30000,
+                    "domain": "coding",
+                    "guidance": "g",
+                    "safety": "s",
+                },
+                datetime.now(UTC) + timedelta(seconds=30),
+                "correlation",
+                "coding-v1",
+            )
+        assert caught.value.code == "CONTEXT_LIMIT_EXCEEDED"
+        assert repo.provider_calls(job_id) == []
+        artifacts = repo.get_artifacts(job_id)
+        admission = [row for row in artifacts if row["kind"] == "admission"]
+        assert len(admission) == 1
+        payload = json.loads(admission[0]["payload"])
+        assert payload["reason"] == "CONTEXT_LIMIT_EXCEEDED"
+        assert payload["provider_started"] is False
+        assert fallback.calls == 0
+        assert starts == []
+        if isolated:
+            assert route.active_process_count == 0
+    finally:
+        await engine.stop()
+        repo.close()
+
+
+def test_exact_prime_rpc_bytes_and_inclusive_prompt_limit():
+    from thinkroom.backends import _prime_rpc_prompt_command
+
+    assert (
+        _prime_rpc_prompt_command('界\n"\\')
+        == ('{"id":"thinkroom-provider","type":"prompt","message":"界\\n\\"\\\\"}\n').encode()
+    )
+    backend = PrimeAgentBackend("/not/executed", "", "", "off")
+    request = frame_request()
+    request = request.model_copy(
+        update={"input": request.input.model_copy(update={"context": '界\n"\\'})}
+    )
+    budget = backend.request_budget(request)
+    request = request.model_copy(
+        update={
+            "input": request.input.model_copy(
+                update={"context": request.input.context + "x" * budget.remaining_bytes}
+            )
+        }
+    )
+    prompt, *_, exact = backend._render_request(request)
+    assert exact.prompt_bytes == len(prompt.encode("utf-8")) == 65536
+    assert exact.rpc_command_bytes == len(_prime_rpc_prompt_command(prompt))
+    assert backend.preflight(request).remaining_bytes == 0
+    oversized = request.model_copy(
+        update={"input": request.input.model_copy(update={"context": request.input.context + "x"})}
+    )
+    assert backend.request_budget(oversized).prompt_bytes == 65537
+    with pytest.raises(BackendError) as caught:
+        backend.preflight(oversized)
+    assert caught.value.code == "CONTEXT_LIMIT_EXCEEDED"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX wrapper")
+def test_process_preflight_keeps_legacy_backend_without_method():
+    from thinkroom.process_backend import ProcessIsolatedBackend
+
+    backend = StaticBackend("legacy", "fake")
+    route = ProcessIsolatedBackend(backend)
+    assert route.preflight(frame_request()) is None
+    assert route.active_process_count == 0
+    assert backend.calls == 0
+
+
+async def test_preflighted_small_request_is_admitted_once(tmp_path):
+    class PreflightedBackend(ScriptedBackend):
+        name = "preflighted"
+        model = "preflighted-v1"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.preflight_calls = 0
+
+        def preflight(self, request: BackendRequestV1) -> None:
+            self.preflight_calls += 1
+
+    repo = SQLiteRepository(str(tmp_path / "preflight-success.sqlite"))
+    repo.open()
+    primary = PreflightedBackend()
+    fallback = StaticBackend("fallback", "fake")
+    engine = ResearchEngine(
+        repo,
+        FailoverBackend(primary, fallback, primary_timeout_seconds=1, fallback_timeout_seconds=1),
+        Settings(),
+    )
+    try:
+        job_id, _ = repo.create_job(
+            ResearchRequest(question="Does a small request remain admitted?"),
+            "hash",
+            None,
+            100,
+            datetime.now(UTC) + timedelta(seconds=30),
+        )
+        claim = repo.claim_next_job(2, "test", "primary", "model")
+        assert claim
+        result = await engine._phase(
+            "frame",
+            job_id,
+            claim[1],
+            None,
+            {
+                "question": "Does a small request remain admitted?",
+                "context": "small context",
+                "domain": "coding",
+                "guidance": "g",
+                "safety": "s",
+            },
+            datetime.now(UTC) + timedelta(seconds=30),
+            "correlation",
+            "coding-v1",
+        )
+        assert result.decision == "Does a small request remain admitted?"
+        assert primary.preflight_calls == 1
+        assert fallback.calls == 0
+        rows = repo.provider_calls(job_id)
+        assert len(rows) == 1
+        assert rows[0]["output_status"] == "validated"
     finally:
         await engine.stop()
         repo.close()

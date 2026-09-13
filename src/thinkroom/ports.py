@@ -77,6 +77,20 @@ class BackendResult(dict[str, Any]):
         self.transport_metrics = transport_metrics
 
 
+@dataclass(frozen=True)
+class RequestBudget:
+    """Content-free byte accounting for one fully rendered provider request."""
+
+    prompt_bytes: int
+    rpc_command_bytes: int
+    limit_bytes: int
+
+    @property
+    def remaining_bytes(self) -> int:
+        """A negative value is the exact prompt-byte overage; no content is truncated."""
+        return self.limit_bytes - self.prompt_bytes
+
+
 class BackendError(RuntimeError):
     """Core-owned typed provider-boundary error."""
 
