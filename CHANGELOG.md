@@ -2,6 +2,30 @@
 
 All notable changes to Thinkroom are documented here.
 
+## 0.2.8 — 2026-09-16
+
+### Fixed
+
+- Prime request admission now limits the complete rendered JSONL command to 65,536 UTF-8 bytes,
+  including RLM instructions, JSON escaping, the RPC envelope, and its newline. Oversized requests
+  fail before invoking the provider instead of being
+  silently truncated or consuming a provider attempt that cannot fit the request.
+- Prime progress accounting excludes repeated tool arguments, partial-result snapshots, and child
+  preview/recap fields from the accounted transport budget. Original wire-byte ceilings, event
+  limits, unknown fields, lifecycle validation, and final-result checks remain enforced.
+
+- Each Prime invocation uses a dedicated daemon socket inside its temporary session directory,
+  avoiding cross-version daemon attachment while preserving the configured authentication home.
+
+### Documentation
+
+- Documented version-isolated Prime backend upgrades and the distinction between progress
+  accounting and actual wire compression.
+
+The SQLite schema and managed Skills bundle retain their existing identities. Prime Agent is an
+external backend executable, not a bundled Python dependency; select its version explicitly and
+verify the configured route after switching it.
+
 ## 0.2.7 — 2026-09-06
 
 ### Fixed

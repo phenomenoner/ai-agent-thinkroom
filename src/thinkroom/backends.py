@@ -21,6 +21,7 @@ from .ports import (
     BackendResult,
     BackendTransportMetrics,
     ProviderInvocationAudit,
+    RequestBudget,
     RolloutBackend,
     backend_input,
     provider_payload,
@@ -288,9 +289,24 @@ def _validate_prime_argv_setting(
 
 
 _PRIME_RPC_EVENT_BYTE_LIMIT = 64_000_000
+_PRIME_RPC_COMMAND_BYTE_LIMIT = 65_536
 _PRIME_RPC_ACCOUNTED_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT = 512_000_000
 _PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES = 128
+
+
+def _prime_rpc_prompt_command(prompt: str) -> bytes:
+    """Use the same wire bytes for request accounting and the stdin write."""
+    return (
+        json.dumps(
+            {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
 _PRIME_RPC_ACCOUNTING_MAX_DEPTH = 64
 _PRIME_RPC_EVENT_COUNT_LIMIT = 20_000
 _PRIME_RPC_TELEMETRY_EVENT_COUNT_LIMIT = 200_000
@@ -299,16 +315,35 @@ _PRIME_CHILD_ID_MARKER_PREFIX = "THINKROOM_CHILD_ID:"
 
 
 def _prime_rpc_accounted_event_bytes(event: dict[str, Any], raw_line_bytes: int) -> int:
-    """Measure one event after removing only repeated, non-authoritative snapshots."""
-    if event.get("type") != "message_update":
+    """Discount known progress snapshots, never lifecycle or terminal evidence.
+
+    This is accounting only: raw bytes, event counts and the original event
+    still pass through the existing limits and lifecycle validation unchanged.
+    Unknown fields remain charged; no event is deduplicated or suppressed.
+    """
+    event_type = event.get("type")
+    if event_type == "message_update":
+        projection = dict(event)
+        projection.pop("message", None)
+        assistant_event = projection.get("assistantMessageEvent")
+        if isinstance(assistant_event, dict):
+            compact_assistant_event = dict(assistant_event)
+            compact_assistant_event.pop("partial", None)
+            projection["assistantMessageEvent"] = compact_assistant_event
+    elif event_type == "tool_execution_update":
+        # Prime repeats arguments and partialResult on each progress callback.
+        # Neither is consumed as result/custody evidence by this adapter.
+        projection = dict(event)
+        projection.pop("args", None)
+        projection.pop("partialResult", None)
+    elif event_type == "rlm_child_update" and isinstance(event.get("child"), dict):
+        projection = dict(event)
+        child = dict(event["child"])
+        child.pop("answerPreview", None)
+        child.pop("recap", None)
+        projection["child"] = child
+    else:
         return max(_PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES, raw_line_bytes)
-    projection = dict(event)
-    projection.pop("message", None)
-    assistant_event = projection.get("assistantMessageEvent")
-    if isinstance(assistant_event, dict):
-        compact_assistant_event = dict(assistant_event)
-        compact_assistant_event.pop("partial", None)
-        projection["assistantMessageEvent"] = compact_assistant_event
     pending: list[tuple[object, int]] = [(projection, 0)]
     while pending:
         value, depth = pending.pop()
@@ -521,7 +556,9 @@ class PrimeAgentBackend:
             max_response_bytes,
         )
 
-    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+    def _render_request(
+        self, request: BackendRequestV1
+    ) -> tuple[str, str, str, str, RequestBudget]:
         payload = provider_payload(request)
         # Prime Agent exposes no supported output-token CLI flag. Use the token
         # budget only as four-byte-per-token prompt guidance and enforce the
@@ -551,11 +588,40 @@ class PrimeAgentBackend:
             "that matches output_json_schema, with no markdown or prose.\n\n"
             f"PROVIDER_REQUEST_JSON:\n{provider_request}"
         )
-        if len(prompt.encode("utf-8")) > 65536:
+        rpc_command_bytes = len(_prime_rpc_prompt_command(prompt))
+        return (
+            prompt,
+            child_name,
+            cleanup_recipe,
+            cleanup_marker,
+            RequestBudget(
+                prompt_bytes=len(prompt.encode("utf-8")),
+                rpc_command_bytes=rpc_command_bytes,
+                limit_bytes=_PRIME_RPC_COMMAND_BYTE_LIMIT,
+            ),
+        )
+
+    @staticmethod
+    def _validate_request_budget(budget: RequestBudget) -> None:
+        if budget.remaining_bytes < 0:
             raise BackendError(
                 "CONTEXT_LIMIT_EXCEEDED",
-                "Prime Agent RPC prompt exceeds the safe byte limit (65536)",
+                "Prime Agent RPC command requires "
+                f"{budget.rpc_command_bytes} UTF-8 bytes; safe limit is {budget.limit_bytes}",
             )
+
+    def request_budget(self, request: BackendRequestV1) -> RequestBudget:
+        *_, budget = self._render_request(request)
+        return budget
+
+    def preflight(self, request: BackendRequestV1) -> RequestBudget:
+        budget = self.request_budget(request)
+        self._validate_request_budget(budget)
+        return budget
+
+    async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        prompt, child_name, cleanup_recipe, cleanup_marker, budget = self._render_request(request)
+        self._validate_request_budget(budget)
 
         proc: asyncio.subprocess.Process | None = None
         stderr_task: asyncio.Task[None] | None = None
@@ -574,6 +640,8 @@ class PrimeAgentBackend:
                 "--no-prompt-templates",
                 "--session-dir",
                 session_dir.name,
+                "--daemon-socket",
+                str(Path(session_dir.name) / "daemon.sock"),
             ]
             if self.provider:
                 argv += ["--provider", self.provider]
@@ -602,14 +670,7 @@ class PrimeAgentBackend:
             rpc_stdin = proc.stdin
             rpc_stdout = proc.stdout
             stderr_task = asyncio.create_task(_drain_unretained(proc.stderr))
-            command = (
-                json.dumps(
-                    {"id": "thinkroom-provider", "type": "prompt", "message": prompt},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
-            )
+            command = _prime_rpc_prompt_command(prompt)
             rpc_stdin.write(command)
             await rpc_stdin.drain()
 
@@ -1260,6 +1321,11 @@ class FailoverBackend:
             self._request_key(request),
             BackendInvocationIdentity(self.primary.name, self.primary.model, False),
         )
+
+    def preflight(self, request: BackendRequestV1) -> object:
+        # CONTEXT_LIMIT_EXCEEDED is terminal, so only primary preflight is relevant.
+        preflight = getattr(self.primary, "preflight", None)
+        return preflight(request) if callable(preflight) else None
 
     async def _invoke_route(
         self,

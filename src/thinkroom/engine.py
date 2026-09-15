@@ -1191,6 +1191,35 @@ class ResearchEngine:
                         "CONTEXT_LIMIT_EXCEEDED",
                         "serialized provider input exceeds THINKROOM_MAX_CONTEXT_BYTES",
                     )
+                preflight = getattr(self.backend, "preflight", None)
+                if callable(preflight):
+                    try:
+                        preflight(request)
+                    except BackendError as exc:
+                        try:
+                            self.repo.put_artifact(
+                                job_id,
+                                aid,
+                                "admission",
+                                {
+                                    "phase": phase,
+                                    "branch_id": branch_id,
+                                    "retry_index": retry_index,
+                                    "reason": exc.code,
+                                    "wait_seconds": 0.0,
+                                    "admission_deadline": (
+                                        min(deadline, admission_deadline).isoformat()
+                                        if admission_deadline is not None
+                                        else deadline.isoformat()
+                                    ),
+                                    "execution_deadline": deadline.isoformat(),
+                                    "provider_started": False,
+                                },
+                            )
+                        except RuntimeError as artifact_error:
+                            if str(artifact_error) != "CANCELLED_OR_STALE_ATTEMPT":
+                                raise
+                        raise
                 log.info(
                     "provider_invocation_started",
                     extra={
