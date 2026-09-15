@@ -2,6 +2,26 @@
 
 All notable changes to Thinkroom are documented here.
 
+## 0.2.8 — 2026-09-16
+
+### Fixed
+
+- Prime request admission now measures the fully rendered prompt, including its RPC and RLM
+  instructions, before invoking the provider. Oversized requests fail explicitly instead of being
+  silently truncated or consuming a provider attempt that cannot fit the request.
+- Prime progress accounting excludes repeated tool arguments, partial-result snapshots, and child
+  preview/recap fields from the accounted transport budget. Original wire-byte ceilings, event
+  limits, unknown fields, lifecycle validation, and final-result checks remain enforced.
+
+### Documentation
+
+- Documented version-isolated Prime backend upgrades and the distinction between progress
+  accounting and actual wire compression.
+
+The SQLite schema and managed Skills bundle retain their existing identities. Prime Agent is an
+external backend executable, not a bundled Python dependency; select its version explicitly and
+verify the configured route after switching it.
+
 ## 0.2.7 — 2026-09-06
 
 ### Fixed

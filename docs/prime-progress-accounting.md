@@ -20,6 +20,23 @@ Constructed no-provider JSONL fixtures reproduce small final answers failing the
 
 These fixtures are not recorded historical provider traffic. Historical failure metrics identify the accounted ceiling but do not contain per-event-type attribution; they cannot prove this change resolves every failed research job. Actual raw stream volume is not reduced. The historical raw-byte-ceiling failure remains a distinct concern.
 
-## Installation boundary
+## Backend upgrades
 
-This candidate is based on the deployed Thinkroom 0.2.7 source commit, not the older remote default branch. Candidate code/package verification does not activate it. The separately prepared Prime 0.9.4 CLI is not a demonstrated drop-in replacement for the current 0.8.1 daemon/runtime: keep versions isolated until RPC/RLM compatibility is exercised. No new provider call or formal comparison run is authorized by this document.
+Prime Agent is installed separately from the Thinkroom Python package. Select an explicit executable
+with `THINKROOM_PRIME_AGENT_EXECUTABLE`; do not assume that updating an unrelated global CLI or an
+embedded agent plugin also updates the backend used by the running service.
+
+When moving from Prime 0.8.1 to 0.9.4:
+
+1. Verify the official release asset checksum and install its dependency closure in a separate
+   versioned directory. Preserve the previous executable and service configuration for rollback.
+2. Keep client and daemon versions paired. Use isolated agent state when checking the new CLI;
+   version/help output alone does not prove RPC or RLM compatibility.
+3. Keep the provider/model route unchanged while testing the backend change. Run a bounded
+   single-stage adapter check and inspect its schema-validated result and cleanup outcome before
+   expanding to a complete research workflow.
+4. Verify the running service's selected executable after cutover. If activation fails, restore the
+   previous selector through the existing service manager rather than starting a second owner.
+
+A successful single-stage check establishes that integration path only, not general research quality
+or multi-branch completion rates. Snapshot accounting also does not reduce physical wire volume.
