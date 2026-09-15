@@ -192,3 +192,38 @@ async def test_projection_preserves_transport_final_and_lifecycle_guards(
     assert expected_message in str(caught.value)
     if expected_audit:
         assert caught.value.audit_status == expected_audit
+
+
+@pytest.mark.asyncio
+async def test_each_invocation_owns_socket_without_replacing_auth_home(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    from pathlib import Path
+
+    agent_home = str(tmp_path / "operator-auth-home")
+    monkeypatch.setenv("PRIME_AGENT_CODING_AGENT_DIR", agent_home)
+    original = asyncio.create_subprocess_exec
+    launches = []
+
+    async def capture(*args, **kwargs):
+        launches.append((args, kwargs.get("env")))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    executable = fixture_cli(tmp_path, "tool_execution_update", "valid")
+    backend = PrimeAgentBackend(str(executable), "", "", "off", max_response_bytes=10000)
+    for _ in range(2):
+        assert (await backend.invoke(request()))["decision"] == "d"
+    assert len(launches) == 2
+    sockets = []
+    for args, env in launches:
+        assert "--daemon-socket" in args
+        socket = Path(args[args.index("--daemon-socket") + 1])
+        session = Path(args[args.index("--session-dir") + 1])
+        assert socket == session / "daemon.sock"
+        assert args[args.index("--cwd") + 1] == str(session)
+        assert not session.exists()
+        assert env is None or env.get("PRIME_AGENT_CODING_AGENT_DIR") == agent_home
+        sockets.append(socket)
+    assert sockets[0] != sockets[1]
+    assert os.environ["PRIME_AGENT_CODING_AGENT_DIR"] == agent_home

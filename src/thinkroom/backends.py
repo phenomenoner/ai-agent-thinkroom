@@ -640,6 +640,8 @@ class PrimeAgentBackend:
                 "--no-prompt-templates",
                 "--session-dir",
                 session_dir.name,
+                "--daemon-socket",
+                str(Path(session_dir.name) / "daemon.sock"),
             ]
             if self.provider:
                 argv += ["--provider", self.provider]

@@ -13,6 +13,9 @@ All notable changes to Thinkroom are documented here.
   preview/recap fields from the accounted transport budget. Original wire-byte ceilings, event
   limits, unknown fields, lifecycle validation, and final-result checks remain enforced.
 
+- Each Prime invocation uses a dedicated daemon socket inside its temporary session directory,
+  avoiding cross-version daemon attachment while preserving the configured authentication home.
+
 ### Documentation
 
 - Documented version-isolated Prime backend upgrades and the distinction between progress

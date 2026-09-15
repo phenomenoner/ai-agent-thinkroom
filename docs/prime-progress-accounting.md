@@ -30,8 +30,10 @@ When moving from Prime 0.8.1 to 0.9.4:
 
 1. Verify the official release asset checksum and install its dependency closure in a separate
    versioned directory. Preserve the previous executable and service configuration for rollback.
-2. Keep client and daemon versions paired. Use isolated agent state when checking the new CLI;
-   version/help output alone does not prove RPC or RLM compatibility.
+2. Keep client and daemon versions paired. Thinkroom supplies a unique `--daemon-socket` within
+   each temporary session directory, while retaining the configured agent/authentication home.
+   Do not replace the authentication home merely to isolate a daemon: doing so may hide saved
+   provider credentials. Version/help output alone does not prove RPC or RLM compatibility.
 3. Keep the provider/model route unchanged while testing the backend change. Run a bounded
    single-stage adapter check and inspect its schema-validated result and cleanup outcome before
    expanding to a complete research workflow.
