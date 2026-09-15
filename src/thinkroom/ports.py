@@ -87,8 +87,8 @@ class RequestBudget:
 
     @property
     def remaining_bytes(self) -> int:
-        """A negative value is the exact prompt-byte overage; no content is truncated."""
-        return self.limit_bytes - self.prompt_bytes
+        """Remaining complete JSONL command bytes, including escaping and newline."""
+        return self.limit_bytes - self.rpc_command_bytes
 
 
 class BackendError(RuntimeError):

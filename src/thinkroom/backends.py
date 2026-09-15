@@ -289,7 +289,7 @@ def _validate_prime_argv_setting(
 
 
 _PRIME_RPC_EVENT_BYTE_LIMIT = 64_000_000
-_PRIME_RPC_PROMPT_BYTE_LIMIT = 65_536
+_PRIME_RPC_COMMAND_BYTE_LIMIT = 65_536
 _PRIME_RPC_ACCOUNTED_BYTE_LIMIT = 64_000_000
 _PRIME_RPC_ABSOLUTE_RAW_BYTE_LIMIT = 512_000_000
 _PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES = 128
@@ -597,7 +597,7 @@ class PrimeAgentBackend:
             RequestBudget(
                 prompt_bytes=len(prompt.encode("utf-8")),
                 rpc_command_bytes=rpc_command_bytes,
-                limit_bytes=_PRIME_RPC_PROMPT_BYTE_LIMIT,
+                limit_bytes=_PRIME_RPC_COMMAND_BYTE_LIMIT,
             ),
         )
 
@@ -606,8 +606,8 @@ class PrimeAgentBackend:
         if budget.remaining_bytes < 0:
             raise BackendError(
                 "CONTEXT_LIMIT_EXCEEDED",
-                "Prime Agent RPC prompt requires "
-                f"{budget.prompt_bytes} UTF-8 bytes; safe limit is {budget.limit_bytes}",
+                "Prime Agent RPC command requires "
+                f"{budget.rpc_command_bytes} UTF-8 bytes; safe limit is {budget.limit_bytes}",
             )
 
     def request_budget(self, request: BackendRequestV1) -> RequestBudget:

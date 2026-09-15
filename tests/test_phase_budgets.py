@@ -172,7 +172,7 @@ async def test_rpc_prompt_preflight_rejects_before_failover_provider_admission(
         budget = primary.request_budget(budget_request)
         assert budget.prompt_bytes > budget.limit_bytes
         assert budget.rpc_command_bytes > budget.prompt_bytes
-        assert budget.remaining_bytes == budget.limit_bytes - budget.prompt_bytes
+        assert budget.remaining_bytes == budget.limit_bytes - budget.rpc_command_bytes
         with pytest.raises(BackendError) as caught:
             await engine._phase(
                 "frame",
@@ -207,7 +207,7 @@ async def test_rpc_prompt_preflight_rejects_before_failover_provider_admission(
         repo.close()
 
 
-def test_exact_prime_rpc_bytes_and_inclusive_prompt_limit():
+async def test_exact_prime_rpc_bytes_and_inclusive_command_limit(monkeypatch):
     from thinkroom.backends import _prime_rpc_prompt_command
 
     assert (
@@ -223,21 +223,35 @@ def test_exact_prime_rpc_bytes_and_inclusive_prompt_limit():
     request = request.model_copy(
         update={
             "input": request.input.model_copy(
-                update={"context": request.input.context + "x" * budget.remaining_bytes}
+                update={"context": request.input.context + "x" * (65536 - budget.rpc_command_bytes)}
             )
         }
     )
     prompt, *_, exact = backend._render_request(request)
-    assert exact.prompt_bytes == len(prompt.encode("utf-8")) == 65536
-    assert exact.rpc_command_bytes == len(_prime_rpc_prompt_command(prompt))
+    assert exact.prompt_bytes == len(prompt.encode("utf-8")) < 65536
+    assert exact.rpc_command_bytes == len(_prime_rpc_prompt_command(prompt)) == 65536
     assert backend.preflight(request).remaining_bytes == 0
     oversized = request.model_copy(
         update={"input": request.input.model_copy(update={"context": request.input.context + "x"})}
     )
-    assert backend.request_budget(oversized).prompt_bytes == 65537
+    assert backend.request_budget(oversized).rpc_command_bytes == 65537
+    assert backend.request_budget(oversized).prompt_bytes < 65536
     with pytest.raises(BackendError) as caught:
         backend.preflight(oversized)
     assert caught.value.code == "CONTEXT_LIMIT_EXCEEDED"
+
+    starts = []
+
+    async def forbidden_start(*args, **kwargs):
+        starts.append(args)
+        raise AssertionError("over-budget command must fail before process startup")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_start)
+    with pytest.raises(BackendError) as invoked:
+        await backend.invoke(oversized)
+    assert invoked.value.code == "CONTEXT_LIMIT_EXCEEDED"
+    assert "65537 UTF-8 bytes" in str(invoked.value)
+    assert starts == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="native POSIX wrapper")

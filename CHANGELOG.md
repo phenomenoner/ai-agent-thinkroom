@@ -6,8 +6,9 @@ All notable changes to Thinkroom are documented here.
 
 ### Fixed
 
-- Prime request admission now measures the fully rendered prompt, including its RPC and RLM
-  instructions, before invoking the provider. Oversized requests fail explicitly instead of being
+- Prime request admission now limits the complete rendered JSONL command to 65,536 UTF-8 bytes,
+  including RLM instructions, JSON escaping, the RPC envelope, and its newline. Oversized requests
+  fail before invoking the provider instead of being
   silently truncated or consuming a provider attempt that cannot fit the request.
 - Prime progress accounting excludes repeated tool arguments, partial-result snapshots, and child
   preview/recap fields from the accounted transport budget. Original wire-byte ceilings, event
