@@ -315,16 +315,35 @@ _PRIME_CHILD_ID_MARKER_PREFIX = "THINKROOM_CHILD_ID:"
 
 
 def _prime_rpc_accounted_event_bytes(event: dict[str, Any], raw_line_bytes: int) -> int:
-    """Measure one event after removing only repeated, non-authoritative snapshots."""
-    if event.get("type") != "message_update":
+    """Discount known progress snapshots, never lifecycle or terminal evidence.
+
+    This is accounting only: raw bytes, event counts and the original event
+    still pass through the existing limits and lifecycle validation unchanged.
+    Unknown fields remain charged; no event is deduplicated or suppressed.
+    """
+    event_type = event.get("type")
+    if event_type == "message_update":
+        projection = dict(event)
+        projection.pop("message", None)
+        assistant_event = projection.get("assistantMessageEvent")
+        if isinstance(assistant_event, dict):
+            compact_assistant_event = dict(assistant_event)
+            compact_assistant_event.pop("partial", None)
+            projection["assistantMessageEvent"] = compact_assistant_event
+    elif event_type == "tool_execution_update":
+        # Prime repeats arguments and partialResult on each progress callback.
+        # Neither is consumed as result/custody evidence by this adapter.
+        projection = dict(event)
+        projection.pop("args", None)
+        projection.pop("partialResult", None)
+    elif event_type == "rlm_child_update" and isinstance(event.get("child"), dict):
+        projection = dict(event)
+        child = dict(event["child"])
+        child.pop("answerPreview", None)
+        child.pop("recap", None)
+        projection["child"] = child
+    else:
         return max(_PRIME_RPC_MIN_ACCOUNTED_EVENT_BYTES, raw_line_bytes)
-    projection = dict(event)
-    projection.pop("message", None)
-    assistant_event = projection.get("assistantMessageEvent")
-    if isinstance(assistant_event, dict):
-        compact_assistant_event = dict(assistant_event)
-        compact_assistant_event.pop("partial", None)
-        projection["assistantMessageEvent"] = compact_assistant_event
     pending: list[tuple[object, int]] = [(projection, 0)]
     while pending:
         value, depth = pending.pop()
