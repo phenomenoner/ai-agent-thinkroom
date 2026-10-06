@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import multiprocessing
 import os
 import signal
+import time
+from collections.abc import Callable
 from multiprocessing.connection import Connection
 from typing import Any
 
@@ -15,6 +18,9 @@ _CANCEL = b"cancel"
 _CLOSE = b"close"
 _MAX_ENVELOPE_BYTES = 10_000_000
 _NORMAL_EXIT_GRACE_SECONDS = 2.0
+_MAX_PROGRESS_OBSERVATIONS = 128
+_PROGRESS_INTERVAL_SECONDS = 30.0
+log = logging.getLogger("thinkroom.process_backend")
 
 
 def _safe_error(exc: BaseException) -> dict[str, Any]:
@@ -46,8 +52,26 @@ async def _run_child(
 ) -> None:
     invocation = asyncio.create_task(backend.invoke(request), name="thinkroom-provider-child")
     cancellation_requested = False
+    last_progress_stage = -1
+    next_progress_at = 0.0
     try:
         while not invocation.done():
+            sample = getattr(backend, "sample_transport_metrics", None)
+            metrics = sample() if callable(sample) else None
+            if type(metrics) is BackendTransportMetrics and (
+                metrics.runtime_stage != last_progress_stage or time.monotonic() >= next_progress_at
+            ):
+                connection.send_bytes(
+                    json.dumps(
+                        {
+                            "kind": "progress",
+                            "transport_metrics": metrics.as_dict(),
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                last_progress_stage = metrics.runtime_stage
+                next_progress_at = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
             if connection.poll():
                 if connection.recv_bytes(32) == _CANCEL:
                     cancellation_requested = True
@@ -109,6 +133,54 @@ def _child_main(connection: Connection, backend: RolloutBackend, request_payload
             pass
     finally:
         connection.close()
+
+
+def _receive_terminal(
+    connection: Connection,
+    request: BackendRequestV1,
+    backend: str,
+    model: str,
+    observer: Callable[[BackendTransportMetrics], None] | None = None,
+) -> bytes:
+    """One pipe reader; bounded progress never becomes provider result evidence."""
+    observations = 0
+    while True:
+        encoded = connection.recv_bytes(_MAX_ENVELOPE_BYTES)
+        try:
+            envelope = json.loads(encoded)
+        except (ValueError, UnicodeDecodeError):
+            return encoded
+        if type(envelope) is not dict or envelope.get("kind") != "progress":
+            return encoded
+        observations += 1
+        if observations > _MAX_PROGRESS_OBSERVATIONS or set(envelope) != {
+            "kind",
+            "transport_metrics",
+        }:
+            raise BackendError("MALFORMED_PROVIDER_OUTPUT", "invalid provider progress envelope")
+        try:
+            metrics = BackendTransportMetrics.from_untrusted(envelope["transport_metrics"])
+        except (TypeError, ValueError) as exc:
+            raise BackendError(
+                "MALFORMED_PROVIDER_OUTPUT", "invalid provider progress metrics"
+            ) from exc
+        if metrics is None or not 0 <= metrics.runtime_stage <= 6:
+            raise BackendError("MALFORMED_PROVIDER_OUTPUT", "invalid provider progress stage")
+        if observer is not None:
+            observer(metrics)
+        log.info(
+            "provider_runtime_progress",
+            extra={
+                "job_id": request.job_id,
+                "attempt_id": request.attempt_id,
+                "phase": request.phase,
+                "branch_id": request.branch_id,
+                "correlation_id": request.correlation_id,
+                "backend": backend,
+                "model": model,
+                "runtime_metrics": metrics.as_dict(),
+            },
+        )
 
 
 class ProcessIsolatedBackend:
@@ -252,6 +324,13 @@ class ProcessIsolatedBackend:
             pass
 
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
+        return await self.invoke_with_progress(request)
+
+    async def invoke_with_progress(
+        self,
+        request: BackendRequestV1,
+        observer: Callable[[BackendTransportMetrics], None] | None = None,
+    ) -> dict[str, Any]:
         parent, child = self._context.Pipe(duplex=True)
         process = self._context.Process(
             target=_child_main,
@@ -264,7 +343,9 @@ class ProcessIsolatedBackend:
             child.close()
             self._processes.add(process)
             receiver = asyncio.create_task(
-                asyncio.to_thread(parent.recv_bytes, _MAX_ENVELOPE_BYTES),
+                asyncio.to_thread(
+                    _receive_terminal, parent, request, self.name, self.model, observer
+                ),
                 name="thinkroom-provider-result",
             )
             try:

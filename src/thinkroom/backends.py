@@ -7,6 +7,7 @@ import random
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -155,12 +156,16 @@ class ScriptedBackend:
         raise BackendError("UNSUPPORTED_PHASE", request.phase)
 
 
-async def _drain_unretained(stream: asyncio.StreamReader) -> None:
+async def _drain_unretained(
+    stream: asyncio.StreamReader, counters: dict[str, int] | None = None
+) -> None:
     """Prevent stderr backpressure without making diagnostics result evidence."""
     while True:
         chunk = await stream.read(65536)
         if not chunk:
             return
+        if counters is not None:
+            counters["stderr_bytes"] += len(chunk)
 
 
 async def _terminate_process(proc: asyncio.subprocess.Process, grace: float = 1.0) -> None:
@@ -460,6 +465,7 @@ def _prime_tool_result_contains(event: dict[str, Any], expected: str, tool_call_
 
 class PrimeAgentBackend:
     name = "prime_agent"
+    _transport_sample: Callable[[], BackendTransportMetrics] | None = None
 
     def __init__(
         self,
@@ -575,9 +581,9 @@ class PrimeAgentBackend:
         prompt = (
             "Act only as a structured Thinkroom research provider. Do not read or write files, "
             "run shell commands, or perform external effects. Use the persistent IPython kernel "
-            "and call the preloaded rlm exactly once. Assign its returned admission handle to "
-            "the exact variable `_thinkroom_child` and name the child "
-            f"{child_name}. Give that child the complete PROVIDER_REQUEST_JSON below and instruct "
+            "and call `rlm.spawn` exactly once. Use the explicit admission assignment "
+            f"`_thinkroom_child = await rlm.spawn(task, name={child_name!r})`, where task includes "
+            "the complete PROVIDER_REQUEST_JSON below. Keep the original handle. Instruct "
             "it to solve the requested research phase independently, then send its findings to "
             "the parent with agent_message.send(receiver_role='parent'). End the first turn after "
             "showing the admission handle. Do not invent or infer the child response. Only after a "
@@ -622,6 +628,24 @@ class PrimeAgentBackend:
     async def invoke(self, request: BackendRequestV1) -> dict[str, Any]:
         prompt, child_name, cleanup_recipe, cleanup_marker, budget = self._render_request(request)
         self._validate_request_budget(budget)
+
+        runtime_started = time.monotonic()
+        transport_counters = {key: 0 for key in BackendTransportMetrics.__dataclass_fields__}
+
+        def elapsed_ms() -> int:
+            return max(0, int((time.monotonic() - runtime_started) * 1000))
+
+        def transport_metrics() -> BackendTransportMetrics:
+            counters = dict(transport_counters)
+            counters["elapsed_ms"] = elapsed_ms()
+            counters["max_idle_ms"] = max(
+                counters["max_idle_ms"], counters["elapsed_ms"] - counters["last_event_ms"]
+            )
+            return BackendTransportMetrics(**counters)
+
+        # Forward content-free observations before an outer deadline can kill
+        # the process. A missing terminal envelope remains an unknown outcome.
+        self._transport_sample = transport_metrics
 
         proc: asyncio.subprocess.Process | None = None
         stderr_task: asyncio.Task[None] | None = None
@@ -669,24 +693,12 @@ class PrimeAgentBackend:
             rpc_proc = proc
             rpc_stdin = proc.stdin
             rpc_stdout = proc.stdout
-            stderr_task = asyncio.create_task(_drain_unretained(proc.stderr))
+            stderr_task = asyncio.create_task(_drain_unretained(proc.stderr, transport_counters))
             command = _prime_rpc_prompt_command(prompt)
             rpc_stdin.write(command)
             await rpc_stdin.drain()
 
-            transport_counters = {
-                "raw_transport_bytes": 0,
-                "accounted_transport_bytes": 0,
-                "event_count": 0,
-                "max_event_bytes": 0,
-                "message_update_count": 0,
-                "message_snapshot_bytes": 0,
-                "message_partial_bytes": 0,
-                "message_delta_bytes": 0,
-            }
-
-            def transport_metrics() -> BackendTransportMetrics:
-                return BackendTransportMetrics(**transport_counters)
+            transport_counters["runtime_stage"] = 1
 
             def serialized_value_bytes(value: object) -> int:
                 return len(
@@ -769,6 +781,14 @@ class PrimeAgentBackend:
                             "Prime Agent RPC ended before an RLM-backed result",
                         )
                     line_bytes = len(line)
+                    observed_ms = elapsed_ms()
+                    if transport_counters["event_count"] == 0:
+                        transport_counters["first_event_ms"] = observed_ms
+                    transport_counters["max_idle_ms"] = max(
+                        transport_counters["max_idle_ms"],
+                        observed_ms - transport_counters["last_event_ms"],
+                    )
+                    transport_counters["last_event_ms"] = observed_ms
                     transport_counters["raw_transport_bytes"] += line_bytes
                     transport_counters["event_count"] += 1
                     transport_counters["max_event_bytes"] = max(
@@ -795,6 +815,15 @@ class PrimeAgentBackend:
                             "MALFORMED_PROVIDER_OUTPUT",
                             "Prime Agent RPC event was not an object",
                         )
+                    if event.get("type") == "tool_execution_start":
+                        transport_counters["tool_calls"] += 1
+                    if event.get("type") == "rlm_child_update":
+                        transport_counters["child_updates"] += 1
+                    if event.get("type") == "message_end" and isinstance(
+                        event.get("message"), dict
+                    ):
+                        if event["message"].get("role") == "assistant":
+                            transport_counters["assistant_turns"] += 1
                     transport_counters["accounted_transport_bytes"] += (
                         _prime_rpc_accounted_event_bytes(event, line_bytes)
                     )
@@ -856,6 +885,10 @@ class PrimeAgentBackend:
                                 "PROVIDER_ERROR", "Prime Agent RPC rejected the provider prompt"
                             )
                         prompt_accepted = True
+                        transport_counters["prompt_accepted_ms"] = elapsed_ms()
+                        transport_counters["runtime_stage"] = max(
+                            2, transport_counters["runtime_stage"]
+                        )
                         continue
                     if event.get("type") == "rlm_child_update":
                         child = event.get("child")
@@ -897,6 +930,9 @@ class PrimeAgentBackend:
                                 "MALFORMED_PROVIDER_OUTPUT",
                                 "Prime Agent replaced the expected RLM child identity",
                             )
+                        if transport_counters["runtime_stage"] < 3:
+                            transport_counters["child_admitted_ms"] = elapsed_ms()
+                            transport_counters["runtime_stage"] = 3
                         if cleanup_observed:
                             if (
                                 status == "cancelled"
@@ -935,6 +971,9 @@ class PrimeAgentBackend:
                                 "PROVIDER_ERROR", "Prime Agent RLM child failed before cleanup"
                             )
                         child_snapshot_replied = child_snapshot_replied or replied
+                        if child_snapshot_replied and transport_counters["runtime_stage"] < 4:
+                            transport_counters["child_reply_ms"] = elapsed_ms()
+                            transport_counters["runtime_stage"] = 4
                         child_snapshot_completed = child_snapshot_completed or status == "done"
                         child_snapshot_status = status
                         continue
@@ -960,6 +999,9 @@ class PrimeAgentBackend:
                         child_message_received = child_message_received or child_message_matches(
                             child_event
                         )
+                        if child_message_received and transport_counters["runtime_stage"] < 4:
+                            transport_counters["child_reply_ms"] = elapsed_ms()
+                            transport_counters["runtime_stage"] = 4
                         continue
                     if event.get("type") == "message_end":
                         message = event.get("message")
@@ -975,6 +1017,9 @@ class PrimeAgentBackend:
                                 "Prime Agent emitted an unexpected RLM child",
                             )
                         child_message_received = child_message_received or matched_child
+                        if matched_child and transport_counters["runtime_stage"] < 4:
+                            transport_counters["child_reply_ms"] = elapsed_ms()
+                            transport_counters["runtime_stage"] = 4
                         text = assistant_text(message)
                         child_custody_received = child_message_received or child_snapshot_replied
                         if not child_custody_received and text is not None:
@@ -1087,6 +1132,8 @@ class PrimeAgentBackend:
                                 "Prime Agent omitted completed RLM child lifecycle evidence",
                             )
                         cleanup_observed = True
+                        transport_counters["cleanup_completed_ms"] = elapsed_ms()
+                        transport_counters["runtime_stage"] = 5
                         continue
                     if event.get("type") != "agent_end":
                         continue
@@ -1162,7 +1209,10 @@ class PrimeAgentBackend:
                             "Prime Agent final message exceeded byte limit",
                             audit_status="OUTPUT_LIMIT_FINAL_TEXT",
                         )
-                    return parse_json_object(final_text)
+                    result = parse_json_object(final_text)
+                    transport_counters["terminal_ms"] = elapsed_ms()
+                    transport_counters["runtime_stage"] = 6
+                    return result
 
             async def run_rpc_and_settle() -> dict[str, Any]:
                 try:
@@ -1200,6 +1250,11 @@ class PrimeAgentBackend:
                     stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
             session_dir.cleanup()
+            self._transport_sample = None
+
+    def sample_transport_metrics(self) -> BackendTransportMetrics | None:
+        sample = getattr(self, "_transport_sample", None)
+        return sample() if callable(sample) else None
 
 
 @dataclass(frozen=True)
@@ -1390,18 +1445,34 @@ class FailoverBackend:
                 admit()
         else:
             admit()
+        latest_metrics: BackendTransportMetrics | None = None
+
+        def observe(metrics: BackendTransportMetrics) -> None:
+            nonlocal latest_metrics
+            latest_metrics = metrics
+
         try:
             try:
                 # Include process startup and wrapper work, not only the inner RPC.
                 # Cancellation drains before another route may start; late results are rejected.
                 timeout_scope = asyncio.timeout(effective_timeout_seconds)
                 async with timeout_scope:
-                    result = await route.invoke(request)
+                    invoke_with_progress = getattr(route, "invoke_with_progress", None)
+                    result = (
+                        await invoke_with_progress(request, observe)
+                        if callable(invoke_with_progress)
+                        else await route.invoke(request)
+                    )
                 if timeout_scope.expired():
                     raise TimeoutError
                 return result
             except TimeoutError:
-                raise BackendError("BACKEND_TIMEOUT", "provider route timed out") from None
+                raise BackendError(
+                    "BACKEND_TIMEOUT",
+                    "provider route timed out",
+                    audit_status="BACKEND_TIMEOUT_ROUTE",
+                    transport_metrics=latest_metrics,
+                ) from None
         except asyncio.CancelledError:
             if audit is not None and call_id is not None:
                 try:

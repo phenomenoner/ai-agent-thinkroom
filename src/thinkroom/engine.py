@@ -17,6 +17,7 @@ from .packs import get_pack
 from .ports import (
     BackendError,
     BackendTransportMetrics,
+    RequestBudget,
     ResearchRepository,
     RolloutBackend,
     provider_payload,
@@ -100,6 +101,52 @@ def safe_exception_details(
     return code, message
 
 
+def _record_provider_diagnostics(
+    repo: Any,
+    request: BackendRequestV1,
+    call_id: int,
+    metrics: BackendTransportMetrics | None,
+    output_status: str,
+) -> None:
+    if type(metrics) is not BackendTransportMetrics:
+        return
+    payload = {
+        "schema_version": 1,
+        "call_id": call_id,
+        "phase": request.phase,
+        "branch_id": request.branch_id,
+        "output_status": output_status,
+        "runtime_metrics": metrics.as_dict(),
+    }
+    log.info(
+        "provider_runtime_finished",
+        extra={
+            "job_id": request.job_id,
+            "attempt_id": request.attempt_id,
+            "phase": request.phase,
+            "branch_id": request.branch_id,
+            "correlation_id": request.correlation_id,
+            "call_id": call_id,
+            "output_status": output_status,
+            "runtime_metrics": metrics.as_dict(),
+        },
+    )
+    try:
+        repo.put_artifact(request.job_id, request.attempt_id, "provider_diagnostics", payload)
+    except Exception:
+        # Optional diagnostics cannot mask cancellation, fencing, a full artifact
+        # budget, or the original provider result. Journal progress remains useful.
+        log.warning(
+            "provider_diagnostics_unavailable",
+            extra={
+                "job_id": request.job_id,
+                "attempt_id": request.attempt_id,
+                "call_id": call_id,
+                "code": "DIAGNOSTICS_UNAVAILABLE",
+            },
+        )
+
+
 class _RepositoryProviderInvocationAudit:
     def __init__(self, repo: Any, retry_index: int) -> None:
         self.repo = repo
@@ -160,7 +207,7 @@ class _RepositoryProviderInvocationAudit:
                 ended_at=datetime.now(UTC).isoformat(),
                 output_size=output_size,
             )
-        return self.repo.finish_provider_call(
+        admitted = self.repo.finish_provider_call(
             call_id,
             request.attempt_id,
             ended_at=datetime.now(UTC).isoformat(),
@@ -173,6 +220,11 @@ class _RepositoryProviderInvocationAudit:
                 else {}
             ),
         )
+        if admitted:
+            _record_provider_diagnostics(
+                self.repo, request, call_id, transport_metrics, output_status
+            )
+        return admitted
 
 
 class _ProviderBoundaryFailure(RuntimeError):
@@ -369,6 +421,18 @@ class ResearchEngine:
             raise reject_admission("SOFT_DEADLINE_REACHED")
 
         remaining_after_acquire = (deadline - datetime.now(UTC)).total_seconds()
+        log.info(
+            "provider_admission_acquired",
+            extra={
+                "job_id": request.job_id,
+                "attempt_id": request.attempt_id,
+                "phase": request.phase,
+                "branch_id": request.branch_id,
+                "correlation_id": request.correlation_id,
+                "wait_ms": max(0, int((time.monotonic() - admission_started) * 1000)),
+                "remaining_deadline_ms": max(0, int(remaining_after_acquire * 1000)),
+            },
+        )
         if remaining_after_acquire <= 0:
             semaphore.release()
             raise BackendError("DEADLINE_EXCEEDED", "job deadline exceeded")
@@ -1192,9 +1256,12 @@ class ResearchEngine:
                         "serialized provider input exceeds THINKROOM_MAX_CONTEXT_BYTES",
                     )
                 preflight = getattr(self.backend, "preflight", None)
+                request_budget: RequestBudget | None = None
                 if callable(preflight):
                     try:
-                        preflight(request)
+                        observed_budget = preflight(request)
+                        if type(observed_budget) is RequestBudget:
+                            request_budget = observed_budget
                     except BackendError as exc:
                         try:
                             self.repo.put_artifact(
@@ -1227,10 +1294,20 @@ class ResearchEngine:
                         "attempt_id": aid,
                         "correlation_id": correlation,
                         "phase": phase,
+                        "branch_id": branch_id,
                         "backend": self.backend.name,
                         "model": getattr(self.backend, "model", "unknown"),
                         "input_bytes": len(serialized_input),
                         "retry_index": retry_index,
+                        **(
+                            {
+                                "rendered_prompt_bytes": request_budget.prompt_bytes,
+                                "rpc_command_bytes": request_budget.rpc_command_bytes,
+                                "context_limit_bytes": request_budget.limit_bytes,
+                            }
+                            if request_budget is not None
+                            else {}
+                        ),
                     },
                 )
                 await self._guard(job_id, aid, hard_deadline)
@@ -1281,6 +1358,9 @@ class ResearchEngine:
                 if not admitted:
                     await self._guard(job_id, aid, hard_deadline)
                     raise BackendError("STALE_ATTEMPT", "attempt is no longer current")
+                _record_provider_diagnostics(
+                    self.repo, request, final_call_id, transport_metrics, "validated"
+                )
                 log.info(
                     "provider_invocation_finished",
                     extra={
@@ -1331,6 +1411,36 @@ class ResearchEngine:
                     include_validation_message=True,
                 )
                 output_status = exc.audit_status if type(exc) is BackendError else safe_status
+                log.warning(
+                    "provider_invocation_failed",
+                    extra={
+                        "job_id": job_id,
+                        "attempt_id": aid,
+                        "phase": phase,
+                        "branch_id": branch_id,
+                        "correlation_id": correlation,
+                        "backend": selected_backend,
+                        "model": selected_model,
+                        "call_id": final_call_id,
+                        "output_status": output_status,
+                        "retry_index": retry_index,
+                        "validation_errors": exc.error_count()
+                        if isinstance(exc, ValidationError)
+                        else 0,
+                        "validation_error_types": sorted(
+                            {
+                                e["type"]
+                                for e in exc.errors(
+                                    include_url=False,
+                                    include_context=False,
+                                    include_input=False,
+                                )
+                            }
+                        )[:16]
+                        if isinstance(exc, ValidationError)
+                        else [],
+                    },
+                )
                 if final_call_id is not None and not call_settled:
                     error_transport_metrics = getattr(exc, "transport_metrics", None)
                     if type(error_transport_metrics) is not BackendTransportMetrics:
@@ -1355,6 +1465,13 @@ class ResearchEngine:
                             if type(error_transport_metrics) is BackendTransportMetrics
                             else {}
                         ),
+                    )
+                    _record_provider_diagnostics(
+                        self.repo,
+                        request,
+                        final_call_id,
+                        error_transport_metrics,
+                        output_status,
                     )
                 retryable = isinstance(exc, ValidationError) or (
                     isinstance(exc, BackendError) and exc.code == "MALFORMED_PROVIDER_OUTPUT"

@@ -145,12 +145,13 @@ Provider output must be exactly one JSON object (an optional single Markdown JSO
 - Prime Agent execution SHALL use an argument vector, never a shell string. Each phase SHALL use an
   invocation-local JSONL RPC session with only the built-in IPython tool, no context files, no
   extensions, no prompt templates, and a temporary working/session directory. Thinkroom SHALL
-  instruct the parent to call preloaded `rlm(...)` exactly once with one predictably named child and
+  instruct the parent to call preloaded `await rlm.spawn(task, name=...)` exactly once with one
+  predictably named child and
   SHALL return phase JSON only after the same RPC stream first exposes either a matching legacy
   child `agent_message` or a matching Prime 0.8.1 child-lifecycle series with one stable child ID,
   the requested session name, completed status, and eventual `repliedSinceTask=true`. The field may
   be absent from an early snapshot because it is optional in Prime 0.8.1, but absence SHALL NOT
-  establish custody. The parent SHALL retain the original `rlm(...)` admission handle. An exact
+  establish custody. The parent SHALL retain the original `rlm.spawn(...)` admission handle. An exact
   IPython cleanup recipe then boundedly polls for that named child's completed status, rejects any
   unexpected direct child, requires the original admission-handle ID to match the current singleton
   registry entry, removes that exact child from the parent registry, verifies the deletion receipt

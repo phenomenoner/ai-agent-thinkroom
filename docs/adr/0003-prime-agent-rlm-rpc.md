@@ -80,10 +80,14 @@ port.
   research domain or persistence model.
 - One RLM child per phase increases latency and provider usage. Operators should start with bounded
   concurrency and tune only from observed capacity.
-- Compatibility depends on Prime Agent's JSONL RPC, IPython tool, `rlm(...)`, `agent_message`, child
+- Compatibility depends on Prime Agent's JSONL RPC, IPython tool, `rlm.spawn(...)`, `agent_message`, child
   lifecycle snapshots, and transcript event contract. v0.2 was exercised with Prime Agent 0.8.1;
   other versions require the
   focused adapter tests and live smoke.
+- The Prime 0.9.8 integration uses explicit `await rlm.spawn(task, name=...)` and retains the original
+  admission handle. See [runtime diagnostics and operational tuning](../runtime-robustness.md) for
+  the pinned upstream fixes, bounded observations, and verification limits. The original 0.8.1
+  evidence remains a historical compatibility result.
 - A real-provider smoke proves integration and child admission, not research correctness or model
   quality.
 

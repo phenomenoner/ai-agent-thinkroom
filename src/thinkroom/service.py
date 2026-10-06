@@ -166,6 +166,18 @@ class JsonFormatter(logging.Formatter):
         "output_bytes",
         "retry_index",
         "removed",
+        "branch_id",
+        "call_id",
+        "output_status",
+        "exception_type",
+        "validation_errors",
+        "validation_error_types",
+        "configuration",
+        "wait_ms",
+        "remaining_deadline_ms",
+        "rendered_prompt_bytes",
+        "rpc_command_bytes",
+        "context_limit_bytes",
     }
 
     def format(self, record: logging.LogRecord) -> str:
@@ -178,6 +190,16 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
+        metrics = getattr(record, "runtime_metrics", None)
+        if type(metrics) is dict:
+            from .ports import BackendTransportMetrics
+
+            try:
+                checked = BackendTransportMetrics.from_untrusted(metrics)
+            except (ValueError, TypeError):
+                checked = None
+            if checked is not None:
+                payload["runtime_metrics"] = checked.as_dict()
         return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -445,7 +467,24 @@ class ThinkroomService:
             self._retention_task.add_done_callback(self._retention_done)
             log.info(
                 "service ready",
-                extra={"backend": self.settings.backend, "database": self.db_path},
+                extra={
+                    "backend": self.settings.backend,
+                    "model": backend.model,
+                    "configuration": {
+                        name: getattr(self.settings, name)
+                        for name in (
+                            "max_concurrency",
+                            "rollout_provider_concurrency",
+                            "job_timeout_seconds",
+                            "job_soft_timeout_seconds",
+                            "backend_timeout_seconds",
+                            "failover_primary_timeout_seconds",
+                            "max_context_bytes",
+                            "max_backend_response_bytes",
+                            "max_persisted_bytes_per_job",
+                        )
+                    },
+                },
             )
         except BaseException:
             self.ready = False

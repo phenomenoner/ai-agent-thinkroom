@@ -34,11 +34,28 @@ class BackendTransportMetrics:
     message_snapshot_bytes: int = 0
     message_partial_bytes: int = 0
     message_delta_bytes: int = 0
+    # Monotonic offsets and counters only; never prompts, model text, or errors.
+    runtime_stage: int = 0
+    elapsed_ms: int = 0
+    first_event_ms: int = 0
+    prompt_accepted_ms: int = 0
+    child_admitted_ms: int = 0
+    child_reply_ms: int = 0
+    cleanup_completed_ms: int = 0
+    terminal_ms: int = 0
+    last_event_ms: int = 0
+    max_idle_ms: int = 0
+    assistant_turns: int = 0
+    tool_calls: int = 0
+    child_updates: int = 0
+    stderr_bytes: int = 0
 
     def __post_init__(self) -> None:
         for value in asdict(self).values():
             if type(value) is not int or value < 0 or value > 2**63 - 1:
                 raise ValueError("transport metrics must be non-negative 64-bit integers")
+        if self.runtime_stage > 6:
+            raise ValueError("transport runtime stage is invalid")
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -47,7 +64,20 @@ class BackendTransportMetrics:
     def from_untrusted(cls, value: object) -> BackendTransportMetrics | None:
         if value is None:
             return None
-        if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
+        legacy_fields = {
+            "raw_transport_bytes",
+            "accounted_transport_bytes",
+            "event_count",
+            "max_event_bytes",
+            "message_update_count",
+            "message_snapshot_bytes",
+            "message_partial_bytes",
+            "message_delta_bytes",
+        }
+        if type(value) is not dict or set(value) not in (
+            set(cls.__dataclass_fields__),
+            legacy_fields,
+        ):
             raise ValueError("transport metrics shape is invalid")
         return cls(**value)
 
